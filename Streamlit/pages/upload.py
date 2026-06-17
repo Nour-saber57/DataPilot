@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-st.title("📁 Upload Dataset")
+st.title("Upload Dataset")
 
 uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
 

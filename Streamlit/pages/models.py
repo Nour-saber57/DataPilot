@@ -1,6 +1,6 @@
 import streamlit as st
 
-st.title("🤖 Model Selection & Training")
+st.title("Model Selection & Training")
 
 if "df" not in st.session_state:
     st.warning("Upload dataset first.")
@@ -17,7 +17,7 @@ st.session_state["target"] = target
 # ------------------------
 # MODEL RECOMMENDATION (STATIC LOGIC)
 # ------------------------
-st.subheader("🧠 Recommended Models")
+st.subheader("Recommended Models")
 
 if df[target].dtype == "object":
     recommended = ["Logistic Regression", "Random Forest", "XGBoost"]
@@ -25,7 +25,7 @@ else:
     recommended = ["Linear Regression", "Random Forest Regressor"]
 
 for m in recommended:
-    st.write("✔", m)
+    st.write("-", m)
 
 # ------------------------
 # MODEL SELECTION
@@ -41,7 +41,7 @@ st.session_state["models"] = selected_models
 # ------------------------
 # TRAIN BUTTON (SIMULATION)
 # ------------------------
-if st.button("🚀 Train Models"):
+if st.button("Train Models"):
 
     import time
     import random

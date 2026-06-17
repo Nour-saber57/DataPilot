@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-st.title("📈 Results Dashboard")
+st.title("Results Dashboard")
 
 if "results" not in st.session_state:
     st.warning("No results found. Train models first.")
@@ -20,5 +20,5 @@ st.dataframe(df)
 # ------------------------
 best_model = df.loc[df["Score"].idxmax()]
 
-st.subheader("🏆 Best Model")
+st.subheader("Best Model")
 st.success(f"{best_model['Model']} with score {best_model['Score']}")

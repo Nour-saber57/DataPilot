@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-st.title("🔍 Dataset Analysis")
+st.title("Dataset Analysis")
 
 if "df" not in st.session_state:
     st.warning("Please upload a dataset first.")
@@ -23,17 +23,17 @@ health_score -= (duplicates / len(df)) * 20
 
 health_score = max(0, round(health_score, 2))
 
-st.subheader("📊 Dataset Overview")
+st.subheader("Dataset Overview")
 st.write(f"Rows: {rows}")
 st.write(f"Columns: {cols}")
 
-st.subheader("🩺 Health Score")
+st.subheader("Health Score")
 st.metric("Dataset Health", f"{health_score}/100")
 
 # ------------------------
 # BASIC INSIGHTS
 # ------------------------
-st.subheader("⚠️ Insights")
+st.subheader("Insights")
 
 insights = []
 
@@ -55,7 +55,7 @@ for i in insights:
 # ------------------------
 # TASK RECOMMENDATION (simple heuristic)
 # ------------------------
-st.subheader("🎯 Recommended Task")
+st.subheader("Recommended Task")
 
 if "target" in df.columns:
     if df["target"].dtype == "object":
