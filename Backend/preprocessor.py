@@ -49,12 +49,6 @@ def create_preprocessing_pipeline(df, target):
         ('categorical', categorical_pipeline, categorical_columns),
     ])
 
-    return pipeline
-
-X_train, X_test, y_train, y_test = split_data(df, target)
-
-pipeline = create_preprocessing_pipeline(df, target)
-X_train_processed = pipeline.fit_transform(X_train)  
-X_test_processed = pipeline.transform(X_test) 
+    return pipeline 
 
 
