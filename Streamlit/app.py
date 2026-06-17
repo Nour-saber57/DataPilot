@@ -1,14 +1,6 @@
-"""
-Streamlit entry point.
+import streamlit as st
 
-This file will contain the frontend
-for dataset upload, visualization,
-model comparison, and inference.
-"""
+st.set_page_config(page_title="ModelWise", layout="wide")
 
-def main():
-    print("Streamlit app placeholder")
-
-
-if __name__ == "__main__":
-    main()
+st.title("📊 ModelWise - Intelligent ML Assistant")
+st.write("Upload your dataset and get insights + model recommendations.")
