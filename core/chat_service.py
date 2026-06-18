@@ -1,14 +1,21 @@
+import json
+from pathlib import Path
 from core.chatbot import ask_gemini
 
-def chat(message, context):
+SYSTEM_PROMPT = Path("prompts/system_prompt.txt").read_text()
+
+
+def generate_response(message, context):
+
+    context_str = json.dumps(context, indent=2)
 
     prompt = f"""
-You are the AI assistant for DataPilot.
+{SYSTEM_PROMPT}
 
-Dataset Context:
-{context}
+DATA CONTEXT:
+{context_str}
 
-User Question:
+USER QUESTION:
 {message}
 """
 

@@ -1,19 +1,21 @@
 def build_context(
-    dataset_profile,
+    profile,
     health_score,
+    task_type,
     strengths,
     weaknesses,
-    recommended_models,
+    models,
     best_model,
-    training_results
+    results
 ):
+
     return {
-        "dataset_profile": dataset_profile,
+        "dataset_profile": profile,
         "health_score": health_score,
+        "task_type": task_type,
         "strengths": strengths,
         "weaknesses": weaknesses,
-        "recommended_models": recommended_models,
+        "recommended_models": models,
         "best_model": best_model,
-        "training_results": training_results
+        "training_results": results
     }
-    
