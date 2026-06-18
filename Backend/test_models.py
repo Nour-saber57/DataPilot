@@ -120,3 +120,44 @@ if results_reg:
 print("\n" + "=" * 70)
 print("✓ All tests completed successfully!")
 print("=" * 70)
+
+### Getters
+from trainer import (
+    get_models,
+    get_best_model,
+    get_results,
+    get_task_type,
+    get_health_score
+)
+
+print("=" * 50)
+print("TESTING TRAINER GETTERS")
+print("=" * 50)
+
+models = ["Logistic Regression", "Random Forest", "Decision Tree"]
+best_model = "Random Forest"
+results = {
+    "Random Forest": {
+        "accuracy": 0.95,
+        "precision": 0.94
+    }
+}
+task_type = "Classification"
+health_score = 92.5
+
+print("\nTesting get_models()")
+print(get_models(models))
+
+print("\nTesting get_best_model()")
+print(get_best_model(best_model))
+
+print("\nTesting get_results()")
+print(get_results(results))
+
+print("\nTesting get_task_type()")
+print(get_task_type(task_type))
+
+print("\nTesting get_health_score()")
+print(get_health_score(health_score))
+
+print("\nAll tests completed successfully.")
