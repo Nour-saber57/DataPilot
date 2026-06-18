@@ -88,3 +88,45 @@ def create_preprocessing_pipeline(df: pd.DataFrame, target: str, ordinal_cols: l
         transformers.append(('cat_ord', ord_pipeline, ord_cols))
         
     return ColumnTransformer(transformers=transformers, remainder='drop')
+import pandas as pd
+
+### 7. Getters For Api
+def get_profile(df: pd.DataFrame) -> dict:
+    return {
+        "rows": len(df),
+        "columns": len(df.columns),
+        "column_names": list(df.columns),
+        "numeric_columns": df.select_dtypes(include=["number"]).columns.tolist(),
+        "categorical_columns": df.select_dtypes(include=["object", "category"]).columns.tolist(),
+        "missing_values": int(df.isnull().sum().sum()),
+        "duplicates": int(df.duplicated().sum())
+    }
+def get_strengths(df: pd.DataFrame) -> list:
+    strengths = []
+
+    if df.isnull().sum().sum() == 0:
+        strengths.append("Dataset has no missing values")
+
+    if df.duplicated().sum() == 0:
+        strengths.append("Dataset has no duplicate rows")
+
+    if len(df) >= 100:
+        strengths.append("Dataset contains a sufficient number of samples")
+
+    if len(df.select_dtypes(include=["number"]).columns) > 0:
+        strengths.append("Dataset contains numerical features")
+
+    return strengths
+def get_weaknesses(df: pd.DataFrame) -> list:
+    weaknesses = []
+
+    if df.isnull().sum().sum() > 0:
+        weaknesses.append("Dataset contains missing values")
+
+    if df.duplicated().sum() > 0:
+        weaknesses.append("Dataset contains duplicate rows")
+
+    if len(df) < 100:
+        weaknesses.append("Small dataset size")
+
+    return weaknesses
