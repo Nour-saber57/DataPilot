@@ -11,7 +11,6 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 
 
 def identify_task(df, target_column):
-    """Identify if task is classification or regression"""
     if df[target_column].dtype == 'object':
         if len(df[target_column].unique()) <= 20:
             return "classification"
