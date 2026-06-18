@@ -12,3 +12,4 @@ requests
 joblib
 plotly
 google-generativeai
+python-dotenv
