@@ -11,3 +11,4 @@ missingno
 requests
 joblib
 plotly
+google-generativeai
