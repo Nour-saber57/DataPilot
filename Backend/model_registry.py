@@ -288,3 +288,15 @@ def evaluate_regression(y_true, y_pred):
         'mae': mean_absolute_error(y_true, y_pred),
         'r2': r2_score(y_true, y_pred)
     }
+# ================ Add getters ================
+### Getters
+def get_models(models: list) -> list:
+    return models
+def get_best_model(best_model: str) -> str:
+    return best_model
+def get_results(results: dict) -> dict:
+    return results
+def get_task_type(task_type: str) -> str:
+    return task_type
+def get_health_score(score: float) -> float:
+    return score
