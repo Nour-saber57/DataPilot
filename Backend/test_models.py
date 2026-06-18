@@ -120,3 +120,15 @@ if results_reg:
 print("\n" + "=" * 70)
 print("✓ All tests completed successfully!")
 print("=" * 70)
+
+### Getters
+def get_models(models: list) -> list:
+    return models
+def get_best_model(best_model: str) -> str:
+    return best_model
+def get_results(results: dict) -> dict:
+    return results
+def get_task_type(task_type: str) -> str:
+    return task_type
+def get_health_score(score: float) -> float:
+    return score
