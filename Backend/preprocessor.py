@@ -11,12 +11,15 @@ def identify_feature_types(df, target):
     numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
     categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
 
-    if target in numeric_columns:
-        numeric_columns.remove(target)
-    if target in categorical_columns:
-        categorical_columns.remove(target)
+    #if target in numeric_columns:
+     #   numeric_columns.remove(target)
+    #if target in categorical_columns:
+     #   categorical_columns.remove(target)
 
-    return numeric_columns, categorical_columns
+    #return numeric_columns, categorical_columns
+
+
+
 
 def split_data(df, target, test_size=0.2, random_state=42):
     X = df.drop(columns=[target])
@@ -35,7 +38,6 @@ def create_preprocessing_pipeline(df, target):
     
     numeric_pipeline = Pipeline(steps=[
         ('imputer', SimpleImputer(strategy='median', add_indicator=True)),
-        ('scaler', StandardScaler()),
     ])
 
     
