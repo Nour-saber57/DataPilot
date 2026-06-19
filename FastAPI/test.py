@@ -16,10 +16,10 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Upload
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_DIR = PROJECT_ROOT / "Backend"
 sys.path.insert(0, str(BACKEND_DIR))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from model_registry import (  # noqa: E402
     evaluate_classification,
@@ -33,6 +33,7 @@ from preprocessor import (  # noqa: E402
     identify_feature_types,
     split_data,
 )
+from core.chat_service import generate_dataset_response
 
 
 app = FastAPI(
@@ -151,6 +152,8 @@ def train_selected_models(
                     "test_size": test_size,
                     "train_samples": len(X_train),
                     "test_samples": len(X_test),
+                    "y_true": y_test.tolist(),
+                    "y_pred": y_pred.tolist(),
                 }
             )
         except Exception as exc:
@@ -387,6 +390,43 @@ def get_results(
         "dataset_id": dataset_id or latest_dataset_id,
         "trained_models": list(results.keys()),
         "results": results,
+    }
+
+
+@app.post("/chat")
+def chat_with_dataset(message: str, dataset_id: str | None = None, model_name: str | None = None):
+    dataset = get_dataset(dataset_id)
+    results = dataset["results"]
+
+    if not results:
+        make_error(400, "No trained model results found. Train a model first.")
+
+    if model_name is None:
+        best_model = max(
+            results.items(),
+            key=lambda item: item[1].get("score", float("-inf"))
+        )
+        model_name, model_result = best_model
+    else:
+        if model_name not in results:
+            make_error(404, f"No results found for model: {model_name}")
+        model_result = results[model_name]
+
+    if "y_true" not in model_result or "y_pred" not in model_result:
+        make_error(400, "This model result does not include y_true/y_pred. Retrain the model first.")
+
+    response = generate_dataset_response(
+        message=message,
+        df=dataset["df"],
+        target=dataset["target_column"],
+        y_true=model_result["y_true"],
+        y_pred=model_result["y_pred"],
+    )
+
+    return {
+        "status": "success",
+        "model_name": model_name,
+        "response": response,
     }
 
 

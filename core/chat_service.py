@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+
+from FastAPI.test import get_dataset
 from core.chatbot import ask_gemini
 from core.context_build import build_context
 
@@ -52,13 +54,6 @@ def generate_response(message, context):
 
     return response
 
-df = 
-target =
-y_true =
-y_pred =
-
-context = build_context(df, target, y_true, y_pred)
-
-user_input_message = 
-
-generate_response(user_input_message, context)
+def generate_dataset_response(message, df, target, y_true, y_pred):
+    context = build_context(df, target, y_true, y_pred)
+    return generate_response(message, context)

@@ -7,12 +7,8 @@ def build_context(df, target, y_true, y_pred):
     task_type = identify_task(df, target)
 
     # Model information
-    best_estimators, best_params = get_all_models(task_type)
+    available_models = get_all_models(task_type)
 
-    estimator_names = {
-        model_name: estimator.__class__.__name__
-        for model_name, estimator in best_estimators.items()
-    }
 
     if task_type == "classification":
         metrics = evaluate_classification(y_true, y_pred)
@@ -35,10 +31,8 @@ def build_context(df, target, y_true, y_pred):
         "task_type": task_type,
 
         "model_recommendations": {
-            "available_models": list(best_estimators.keys()),
-            "best_estimators": estimator_names,
-            "best_params": best_params
-        },
+            "available_models": list(available_models.keys())
+            },
 
         "evaluation_metrics": metrics
     }
