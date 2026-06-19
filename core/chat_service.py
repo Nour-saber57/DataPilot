@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-from FastAPI.test import get_dataset
 from core.chatbot import ask_gemini
 from core.context_build import build_context
 
