@@ -10,12 +10,6 @@ chat_history = []
 MAX_HISTORY = 3
 
 
-df = 
-target =
-y_true =
-y_pred =
-
-context = build_context(df, target, y_true, y_pred)
 
 def add_to_history(role, message):
     chat_history.append({
@@ -57,3 +51,14 @@ def generate_response(message, context):
     add_to_history("assistant", response)
 
     return response
+
+df = 
+target =
+y_true =
+y_pred =
+
+context = build_context(df, target, y_true, y_pred)
+
+user_input_message = 
+
+generate_response(user_input_message, context)
