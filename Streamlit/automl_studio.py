@@ -78,7 +78,7 @@ with st.sidebar:
         st.success("✓ Backend Connected")
     else:
         st.error("✗ Backend Not Connected")
-        st.info("Make sure to run: `python -m uvicorn main:app --reload --port 8000`")
+        st.info("Make sure to run: `python -m uvicorn FastAPI.test:app --reload --port 8000`")
     
     test_size = st.slider("Test Size", min_value=0.1, max_value=0.5, value=0.2, step=0.05)
 
@@ -110,18 +110,24 @@ with tab1:
             if st.button("📤 Upload & Analyze", key="upload_btn"):
                 with st.spinner("Uploading data to backend..."):
                     try:
-                        files = {'file': uploaded_file.getvalue()}
-                        params = {'target_column': target_col}
-                        
+                        files = {
+                             "file": (uploaded_file.name, uploaded_file.getvalue(), "text/csv")
+                             }
+                        params = {"target_column": target_col}
                         response = requests.post(
-                            f"{API_BASE_URL}/upload-data",
-                            files=files,
-                            params=params
-                        )
-                        
+                             f"{API_BASE_URL}/upload-data",
+                             files=files,
+                             params=params
+                             )
                         result = response.json()
-                        
-                        if result['status'] == 'success':
+                        if not response.ok:
+                            detail = result.get("detail", result)
+                            if isinstance(detail, dict):
+                                st.error(f"Error: {detail.get('message', detail)}")
+                            else:
+                                st.error(f"Error: {detail}")
+                                st.stop()
+                        if result.get("status") == "success":
                             st.session_state.data_loaded = True
                             st.session_state.target_column = target_col
                             
@@ -159,7 +165,7 @@ with tab1:
                                     'Missing': list(missing.values())
                                 }))
                         else:
-                            st.error(f"Error: {result['message']}")
+                            st.error(f"Error: {result.get('message', 'Upload failed')}")
                     
                     except Exception as e:
                         st.error(f"Connection error: {str(e)}")
@@ -250,7 +256,7 @@ with tab2:
                                 
                                 st.info(f"Train: {result['train_samples']} | Test: {result['test_samples']}")
                             else:
-                                st.error(f"Error: {result['message']}")
+                                st.error(f"Error: {result.get('message', 'Training failed')}")
                         
                         except Exception as e:
                             st.error(f"Connection error: {str(e)}")

@@ -32,7 +32,7 @@ print("1️⃣  Starting FastAPI Backend on http://localhost:8000")
 print("=" * 70)
 
 backend_process = subprocess.Popen(
-    [venv_path, "-m", "uvicorn", "FastAPI.main:app", "--reload", "--port", "8000"],
+    [venv_path, "-m", "uvicorn", "FastAPI.test:app", "--reload", "--port", "8000"],
     cwd=script_dir,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE
