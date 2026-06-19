@@ -16,6 +16,18 @@ def identify_feature_types(df, target):
 
     return numeric_columns, categorical_columns
 
+def split_data(df, target, test_size=0.2, random_state=42):
+    df = df.dropna(subset=[target])
+    X = df.drop(columns=[target])
+    y = df[target]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state
+    )
+
+    return X_train, X_test, y_train, y_test
+
+
 def create_preprocessing_pipeline(df, target):
     numeric_columns, categorical_columns = identify_feature_types(df, target)
 
@@ -38,17 +50,8 @@ def create_preprocessing_pipeline(df, target):
     return pipeline 
 
 
-def split_data(df, target, test_size=0.2, random_state=42):
-    X = df.drop(columns=[target])
-    y = df[target]
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state
-    )
 
-    return X_train, X_test, y_train, y_test
-
-def scaling(X_train, X_test):
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_test= scaler.transform(X_test)
