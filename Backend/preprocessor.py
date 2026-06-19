@@ -8,8 +8,9 @@ from sklearn.model_selection import train_test_split
 
 
 def identify_feature_types(df, target):
-    numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
+    feature_df = df.drop(columns=[target])
+    numeric_columns = feature_df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    categorical_columns = feature_df.select_dtypes(include=['object']).columns.tolist()
 
    
 
