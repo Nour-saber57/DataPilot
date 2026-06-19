@@ -9,6 +9,12 @@ chat_history = []
 
 MAX_HISTORY = 3
 
+
+df = 
+target =
+y_true =
+y_pred =
+
 context = build_context(df, target, y_true, y_pred)
 
 def add_to_history(role, message):
