@@ -7,3 +7,15 @@ models/
 logs/
 core/__pycache__
 core/*.pyc
+
+#Streamlit 
+
+Streamlit/outputs/
+Streamlit/outputs_reg/
+
+# OS artifacts
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
