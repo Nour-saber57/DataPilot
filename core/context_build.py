@@ -1,36 +1,46 @@
-def build_context(
-    profile,
-    health_score,
-    task_type,
-    strengths,
-    weaknesses,
-    models,
-    best_model,
-    results
-):
+from Backend.model_registry import evaluate_classification, evaluate_regression, get_all_models, identify_task
+from Backend.preprocessor import identify_feature_types
+
+def build_context(df, target, y_true, y_pred):
+    numeric_columns, categorical_columns = identify_feature_types(df, target)
+
+    task_type = identify_task(df, target)
+
+    # Model information
+    best_estimators, best_params = get_all_models(task_type)
+
+    estimator_names = {
+        model_name: estimator.__class__.__name__
+        for model_name, estimator in best_estimators.items()
+    }
+
+    if task_type == "classification":
+        metrics = evaluate_classification(y_true, y_pred)
+    else:
+        metrics = evaluate_regression(y_true, y_pred)
 
     context = {
-        "dataset_profile": profile or {},
-        "health_score": float(health_score) if health_score is not None else 0,
-        "task_type": task_type or "Unknown",
-        "strengths": strengths or [],
-        "weaknesses": weaknesses or [],
-        "recommended_models": models or [],
-        "best_model": best_model or "Not determined",
-        "training_results": results or {}
+        "dataset_profile": {
+            "rows": int(len(df)),
+            "columns": int(len(df.columns)),
+            "target_column": target,
+
+            "numeric_columns": numeric_columns,
+            "categorical_columns": categorical_columns,
+
+            "missing_values": int(df.isnull().sum().sum()),
+            "duplicate_rows": int(df.duplicated().sum())
+        },
+
+        "task_type": task_type,
+
+        "model_recommendations": {
+            "available_models": list(best_estimators.keys()),
+            "best_estimators": estimator_names,
+            "best_params": best_params
+        },
+
+        "evaluation_metrics": metrics
     }
 
     return context
-
-
-## dummy data for testing
-context = build_context(
-    profile={"rows": 1000, "columns": 12},
-    health_score=78,
-    task_type="Regression",
-    strengths=["Low missing values"],
-    weaknesses=["Outliers in target"],
-    models=["Random Forest", "XGBoost"],
-    best_model="Random Forest",
-    results={"RF": 0.86, "XGB": 0.84}
-)
