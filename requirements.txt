@@ -13,3 +13,4 @@ joblib
 plotly
 google-generativeai
 python-dotenv
+python-multipart
