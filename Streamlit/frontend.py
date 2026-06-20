@@ -500,3 +500,7 @@ with right:
           <div class="pipeline-item">🕳️ {df.isnull().mean().mean()*100:.1f}% missing</div>
           <div class="pipeline-item">📋 {df.duplicated().sum()} duplicates</div>
         </div>""", unsafe_allow_html=True)
+    git add .
+    git commit -m "save changes"   
+    git push origin main
+    
