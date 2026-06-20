@@ -19,3 +19,17 @@ Streamlit/outputs_reg/
 # IDE
 .vscode/
 .idea/
+
+
+## Testing
+Streamlit\automl
+Streamlit\llm
+Streamlit\automl_studio_old.py
+Streamlit\interface_old.py
+Streamlit\simple_test_old.py
+Streamlit\test_app_old.py
+run_automl.py
+run_streamlit.py
+FastAPI\main_old.py
+core\chatbot_test.py
+core\context_schema.py
