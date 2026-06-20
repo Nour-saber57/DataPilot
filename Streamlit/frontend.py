@@ -168,81 +168,121 @@ REGRESSION_MODELS = {
 
 def get_model_instance(info):
     import importlib
-    mod   = importlib.import_module(info["module"])
-    cls   = getattr(mod, info["class"])
+    mod = importlib.import_module(info["module"])
+    cls = getattr(mod, info["class"])
     return cls(**info["params"])
 
-def run_single_model(df, target_col, task, model_name):
-    """Train one model and return score + classification report snippet."""
+# ── Metric evaluators (user-provided) ────────────────────────────────────────
+def evaluate_classification(y_true, y_pred):
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+    return {
+        "accuracy":  round(accuracy_score(y_true, y_pred), 4),
+        "precision": round(precision_score(y_true, y_pred, average="weighted", zero_division=0), 4),
+        "recall":    round(recall_score(y_true, y_pred, average="weighted", zero_division=0), 4),
+        "f1":        round(f1_score(y_true, y_pred, average="weighted", zero_division=0), 4),
+    }
+
+def evaluate_regression(y_true, y_pred):
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    mse = mean_squared_error(y_true, y_pred)
+    return {
+        "mse":  round(mse, 4),
+        "rmse": round(np.sqrt(mse), 4),
+        "mae":  round(mean_absolute_error(y_true, y_pred), 4),
+        "r2":   round(r2_score(y_true, y_pred), 4),
+    }
+
+def _prepare_data(df, target_col, task):
+    """Shared data prep: encode, split, return X_train/test, y_train/test + label_classes."""
     from sklearn.model_selection import train_test_split
     from sklearn.preprocessing import LabelEncoder
-    from sklearn.metrics import accuracy_score, r2_score
-
-    X = df.drop(columns=[target_col])
-    y = df[target_col]
-
-    # Encode categoricals in X
+    X = df.drop(columns=[target_col]).copy()
+    y = df[target_col].copy()
     for col in X.select_dtypes(include="object").columns:
         X[col] = LabelEncoder().fit_transform(X[col].astype(str))
-
+    label_classes = None
     if task == "Classification":
         le = LabelEncoder()
         y  = le.fit_transform(y.astype(str))
-        models_map = CLASSIFICATION_MODELS
-    else:
-        models_map = REGRESSION_MODELS
+        label_classes = le.classes_
+    return train_test_split(X, y, test_size=0.2, random_state=42), label_classes
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    info  = models_map[model_name]
-    model = get_model_instance(info)
+def run_single_model(df, target_col, task, model_name):
+    """Train one model and return rich metrics dict."""
+    from sklearn.metrics import confusion_matrix
+    (X_train, X_test, y_train, y_test), label_classes = _prepare_data(df, target_col, task)
+    models_map = CLASSIFICATION_MODELS if task == "Classification" else REGRESSION_MODELS
+    model = get_model_instance(models_map[model_name])
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
 
     if task == "Classification":
-        score = accuracy_score(y_test, preds)
-        metric_label = "Accuracy"
+        metrics = evaluate_classification(y_test, preds)
+        cm      = confusion_matrix(y_test, preds).tolist()
+        # feature importances if available
+        fi = None
+        if hasattr(model, "feature_importances_"):
+            fi = dict(zip(X_train.columns, model.feature_importances_.tolist()))
+        elif hasattr(model, "coef_"):
+            fi = dict(zip(X_train.columns, np.abs(model.coef_[0] if model.coef_.ndim > 1 else model.coef_).tolist()))
+        return {
+            "model": model_name, "task": task, "metrics": metrics,
+            "confusion_matrix": cm, "label_classes": label_classes.tolist() if label_classes is not None else None,
+            "feature_importances": fi,
+            "y_test": y_test.tolist(), "y_pred": preds.tolist(),
+        }
     else:
-        score = r2_score(y_test, preds)
-        metric_label = "R² Score"
-
-    return score, metric_label
+        metrics = evaluate_regression(y_test, preds)
+        fi = None
+        if hasattr(model, "feature_importances_"):
+            fi = dict(zip(X_train.columns, model.feature_importances_.tolist()))
+        elif hasattr(model, "coef_"):
+            fi = dict(zip(X_train.columns, np.abs(model.coef_).tolist()))
+        return {
+            "model": model_name, "task": task, "metrics": metrics,
+            "feature_importances": fi,
+            "y_test": y_test.tolist(), "y_pred": preds.tolist(),
+        }
 
 def run_all_models(df, target_col, task):
-    """Train all models and return dict of {model_name: (score, metric_label)}."""
-    from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import LabelEncoder
-    from sklearn.metrics import accuracy_score, r2_score
-
-    X = df.drop(columns=[target_col])
-    y = df[target_col]
-
-    for col in X.select_dtypes(include="object").columns:
-        X[col] = LabelEncoder().fit_transform(X[col].astype(str))
-
-    if task == "Classification":
-        le = LabelEncoder()
-        y  = le.fit_transform(y.astype(str))
-        models_map  = CLASSIFICATION_MODELS
-        metric_label = "Accuracy"
-        score_fn    = accuracy_score
-    else:
-        models_map  = REGRESSION_MODELS
-        metric_label = "R² Score"
-        score_fn    = r2_score
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    results = {}
+    """Train all models; return list of rich result dicts sorted by primary metric."""
+    from sklearn.metrics import confusion_matrix
+    (X_train, X_test, y_train, y_test), label_classes = _prepare_data(df, target_col, task)
+    models_map = CLASSIFICATION_MODELS if task == "Classification" else REGRESSION_MODELS
+    results = []
     for name, info in models_map.items():
         try:
             m = get_model_instance(info)
             m.fit(X_train, y_train)
-            score = score_fn(y_test, m.predict(X_test))
-            results[name] = (round(score, 4), metric_label)
+            preds = m.predict(X_test)
+            if task == "Classification":
+                metrics = evaluate_classification(y_test, preds)
+                cm      = confusion_matrix(y_test, preds).tolist()
+                fi = None
+                if hasattr(m, "feature_importances_"):
+                    fi = dict(zip(X_train.columns, m.feature_importances_.tolist()))
+                results.append({
+                    "model": name, "task": task, "metrics": metrics,
+                    "confusion_matrix": cm,
+                    "label_classes": label_classes.tolist() if label_classes is not None else None,
+                    "feature_importances": fi,
+                    "y_test": y_test.tolist(), "y_pred": preds.tolist(),
+                })
+            else:
+                metrics = evaluate_regression(y_test, preds)
+                fi = None
+                if hasattr(m, "feature_importances_"):
+                    fi = dict(zip(X_train.columns, m.feature_importances_.tolist()))
+                results.append({
+                    "model": name, "task": task, "metrics": metrics,
+                    "feature_importances": fi,
+                    "y_test": y_test.tolist(), "y_pred": preds.tolist(),
+                })
         except Exception as e:
-            results[name] = (None, str(e))
-
+            results.append({"model": name, "task": task, "error": str(e), "metrics": {}})
+    # Sort: classification → accuracy desc, regression → r2 desc
+    sort_key = "accuracy" if task == "Classification" else "r2"
+    results.sort(key=lambda r: r.get("metrics", {}).get(sort_key, -9999), reverse=True)
     return results
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -261,6 +301,7 @@ for key, val in {
     "single_result":     None,
     "selected_model":    None,
     "show_model_picker": False,
+    "results_model_idx": 0,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
@@ -372,6 +413,7 @@ with left:
                         st.session_state.detected_task,
                     )
                 st.session_state.automl_results = results
+                st.session_state.results_model_idx = 0
                 st.session_state.pipeline_status["Hyperparameter Search"] = "done"
                 st.session_state.pipeline_status["Model Training"]        = "done"
                 st.rerun()
@@ -407,17 +449,13 @@ with left:
                 if run_one_clicked:
                     st.session_state.pipeline_status["Model Training"] = "running"
                     with st.spinner(f"Training {chosen}…"):
-                        score, metric_label = run_single_model(
+                        result = run_single_model(
                             st.session_state.df,
                             st.session_state.target_col,
                             st.session_state.detected_task,
                             chosen,
                         )
-                    st.session_state.single_result = {
-                        "model":        chosen,
-                        "score":        score,
-                        "metric_label": metric_label,
-                    }
+                    st.session_state.single_result = result
                     st.session_state.pipeline_status["Hyperparameter Search"] = "done"
                     st.session_state.pipeline_status["Model Training"]        = "done"
                     st.rerun()
@@ -425,19 +463,20 @@ with left:
             # ── AutoML results display ─────────────────────────────────────
             if st.session_state.automl_results:
                 results     = st.session_state.automl_results
-                valid       = {k: v for k, v in results.items() if v[0] is not None}
-                sorted_res  = sorted(valid.items(), key=lambda x: x[1][0], reverse=True)
+                valid       = [r for r in results if "error" not in r]
                 medal       = ["🥇", "🥈", "🥉"]
-                metric_label = sorted_res[0][1][1] if sorted_res else ""
+                task_key    = "accuracy" if st.session_state.detected_task == "Classification" else "r2"
+                metric_label = "Accuracy" if st.session_state.detected_task == "Classification" else "R²"
 
                 rows_html = ""
-                for i, (name, (score, _)) in enumerate(sorted_res):
-                    pct      = max(0, min(100, score * 100))
+                for i, r in enumerate(valid):
+                    score     = r["metrics"].get(task_key, 0)
+                    pct       = max(0, min(100, score * 100))
                     bar_color = "#2ecc71" if i == 0 else ("#e67e22" if i == 1 else "#3498db")
-                    m_icon   = medal[i] if i < 3 else "  "
+                    m_icon    = medal[i] if i < 3 else "  "
                     rows_html += f"""
                     <div class="model-row">
-                      <span class="model-name">{m_icon} {name}</span>
+                      <span class="model-name">{m_icon} {r["model"]}</span>
                       <span class="model-score" style="color:{bar_color}">{score:.4f}</span>
                     </div>
                     <div class="model-bar-bg">
@@ -451,22 +490,27 @@ with left:
                   {rows_html}
                 </div>
                 """, unsafe_allow_html=True)
+                st.info("👉 Switch to **Dashboard** for full metrics & charts")
 
             # ── Single model result display ────────────────────────────────
-            if st.session_state.single_result:
-                r     = st.session_state.single_result
-                score = r["score"]
+            if st.session_state.single_result and "error" not in st.session_state.single_result:
+                r    = st.session_state.single_result
+                task = r["task"]
+                key  = "accuracy" if task == "Classification" else "r2"
+                score = r["metrics"].get(key, 0)
                 pct   = max(0, min(100, score * 100))
+                label = "Accuracy" if task == "Classification" else "R²"
                 st.markdown(f"""
                 <div class="single-model-panel">
                   <div class="model-progress-title">Single Model Result</div>
                   <div class="single-result-row">Model: <strong style="color:#e6edf3">{r["model"]}</strong></div>
-                  <div class="single-result-row">{r["metric_label"]}: <span class="single-result-score">{score:.4f}</span></div>
+                  <div class="single-result-row">{label}: <span class="single-result-score">{score:.4f}</span></div>
                   <div class="model-bar-bg" style="margin-top:0.5rem">
                     <div class="model-bar-fill" style="width:{pct:.1f}%;background:#2ecc71"></div>
                   </div>
                 </div>
                 """, unsafe_allow_html=True)
+                st.info("👉 Switch to **Dashboard** for full metrics & charts")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CENTER — Tabs
@@ -639,9 +683,22 @@ with center:
 
     # ── DASHBOARD ────────────────────────────────────────────────────────────
     elif st.session_state.active_tab == "Dashboard":
+        import plotly.express as px
+        import plotly.graph_objects as go
+
+        # Gather active results
+        active_results = None
+        is_automl = False
+        if st.session_state.automl_results:
+            active_results = [r for r in st.session_state.automl_results if "error" not in r]
+            is_automl = True
+        elif st.session_state.single_result and "error" not in st.session_state.single_result:
+            active_results = [st.session_state.single_result]
+
         if df is None:
-            st.info("Upload a CSV file to see the dashboard.")
-        else:
+            st.info("⬅️ Upload a CSV file first.")
+        elif not active_results:
+            # ── Default dataset dashboard when no model trained yet ──────────
             m1, m2, m3 = st.columns(3)
             m1.metric("Rows", f"{len(df):,}")
             m2.metric("Columns", len(df.columns))
@@ -652,36 +709,301 @@ with center:
             st.dataframe(type_df, use_container_width=True)
             st.markdown("**Data preview**")
             st.dataframe(df.head(10), use_container_width=True)
+        else:
+            task = active_results[0]["task"]
+
+            # ════════════════════════════════════════════════════════════════
+            # MODEL SELECTOR (AutoML mode: pick which model to inspect)
+            # ════════════════════════════════════════════════════════════════
+            if is_automl and len(active_results) > 1:
+                model_names = [r["model"] for r in active_results]
+                sel_idx = st.session_state.get("results_model_idx", 0)
+                picked  = st.selectbox(
+                    "🔎 Inspect model",
+                    model_names,
+                    index=sel_idx,
+                    key="dashboard_model_sel",
+                )
+                sel_idx = model_names.index(picked)
+                st.session_state.results_model_idx = sel_idx
+                result = active_results[sel_idx]
+            else:
+                result = active_results[0]
+
+            metrics = result["metrics"]
+            model_name = result["model"]
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 1 — Hero metric cards
+            # ════════════════════════════════════════════════════════════════
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#0d2818,#061a10);border:1px solid #1a3a28;
+                        border-radius:12px;padding:1.2rem 1.6rem;margin-bottom:1.4rem">
+              <div style="font-size:0.75rem;color:#6e7681;margin-bottom:0.3rem">Model Results</div>
+              <div style="font-size:1.3rem;font-weight:700;color:#2ecc71">{model_name}</div>
+              <div style="font-size:0.8rem;color:#8b949e;margin-top:2px">{task} · {len(result.get("y_test",[]))} test samples</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if task == "Classification":
+                c1, c2, c3, c4 = st.columns(4)
+                metric_defs = [
+                    ("Accuracy",  metrics.get("accuracy", 0),  "#2ecc71", "Overall correct predictions"),
+                    ("Precision", metrics.get("precision", 0), "#3498db", "Positive predictive value"),
+                    ("Recall",    metrics.get("recall", 0),    "#e67e22", "True positive rate"),
+                    ("F1 Score",  metrics.get("f1", 0),        "#9b59b6", "Harmonic mean of P & R"),
+                ]
+                for col, (label, val, color, subtitle) in zip([c1,c2,c3,c4], metric_defs):
+                    pct = val * 100
+                    col.markdown(f"""
+                    <div style="background:#161b22;border:1px solid #21262d;border-radius:12px;padding:1rem 1.1rem">
+                      <div style="font-size:0.72rem;color:#6e7681;margin-bottom:4px">{label}</div>
+                      <div style="font-size:1.9rem;font-weight:700;color:{color};line-height:1">{val:.4f}</div>
+                      <div style="font-size:0.68rem;color:#6e7681;margin-top:4px">{subtitle}</div>
+                      <div style="background:#21262d;border-radius:4px;height:4px;margin-top:8px">
+                        <div style="width:{pct:.1f}%;background:{color};border-radius:4px;height:4px"></div>
+                      </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                c1, c2, c3, c4 = st.columns(4)
+                metric_defs = [
+                    ("R² Score", metrics.get("r2", 0),   "#2ecc71", "Variance explained"),
+                    ("RMSE",     metrics.get("rmse", 0), "#e74c3c", "Root mean squared error"),
+                    ("MAE",      metrics.get("mae", 0),  "#e67e22", "Mean absolute error"),
+                    ("MSE",      metrics.get("mse", 0),  "#3498db", "Mean squared error"),
+                ]
+                for col, (label, val, color, subtitle) in zip([c1,c2,c3,c4], metric_defs):
+                    col.markdown(f"""
+                    <div style="background:#161b22;border:1px solid #21262d;border-radius:12px;padding:1rem 1.1rem">
+                      <div style="font-size:0.72rem;color:#6e7681;margin-bottom:4px">{label}</div>
+                      <div style="font-size:1.9rem;font-weight:700;color:{color};line-height:1">{val:.4f}</div>
+                      <div style="font-size:0.68rem;color:#6e7681;margin-top:4px">{subtitle}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 2 — AutoML Leaderboard comparison (only in automl mode)
+            # ════════════════════════════════════════════════════════════════
+            if is_automl and len(active_results) > 1:
+                st.markdown("### 🏆 Model Leaderboard")
+                sort_key    = "accuracy" if task == "Classification" else "r2"
+                metric_keys = ["accuracy","precision","recall","f1"] if task == "Classification" else ["r2","rmse","mae","mse"]
+                table_rows  = []
+                for i, r in enumerate(active_results):
+                    row = {"#": ["🥇","🥈","🥉"][i] if i < 3 else str(i+1), "Model": r["model"]}
+                    row.update({k.upper(): f"{r['metrics'].get(k,0):.4f}" for k in metric_keys})
+                    table_rows.append(row)
+                lb_df = pd.DataFrame(table_rows)
+                st.dataframe(lb_df, use_container_width=True, hide_index=True)
+
+                # Grouped bar chart comparing all models across metrics
+                bar_metrics = ["accuracy","precision","recall","f1"] if task == "Classification" else ["r2"]
+                bar_data = []
+                for r in active_results:
+                    for m in bar_metrics:
+                        bar_data.append({"Model": r["model"], "Metric": m.upper(), "Value": r["metrics"].get(m, 0)})
+                bar_df = pd.DataFrame(bar_data)
+                fig_bar = px.bar(
+                    bar_df, x="Metric", y="Value", color="Model", barmode="group",
+                    color_discrete_sequence=["#2ecc71","#3498db","#e67e22","#9b59b6","#e74c3c"],
+                    title="Model Comparison — All Metrics",
+                )
+                fig_bar.update_layout(yaxis_range=[0,1.05])
+                apply_theme(fig_bar)
+                st.plotly_chart(fig_bar, use_container_width=True)
+                st.markdown("---")
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 3 — Task-specific deep charts
+            # ════════════════════════════════════════════════════════════════
+            y_test = np.array(result.get("y_test", []))
+            y_pred = np.array(result.get("y_pred", []))
+
+            if task == "Classification":
+                left_chart, right_chart = st.columns(2)
+
+                # ── Confusion Matrix ──────────────────────────────────────
+                with left_chart:
+                    st.markdown("#### 🔲 Confusion Matrix")
+                    cm          = np.array(result.get("confusion_matrix", []))
+                    label_names = result.get("label_classes") or [str(i) for i in range(len(cm))]
+                    if cm.size:
+                        fig_cm = go.Figure(go.Heatmap(
+                            z=cm[::-1],
+                            x=label_names,
+                            y=label_names[::-1],
+                            colorscale=[[0,"#161b22"],[0.5,"#145a32"],[1,"#2ecc71"]],
+                            text=cm[::-1],
+                            texttemplate="<b>%{text}</b>",
+                            textfont={"size": 14},
+                            showscale=False,
+                        ))
+                        fig_cm.update_layout(
+                            title=f"Confusion Matrix — {model_name}",
+                            xaxis_title="Predicted", yaxis_title="Actual",
+                            height=380,
+                        )
+                        apply_theme(fig_cm)
+                        st.plotly_chart(fig_cm, use_container_width=True)
+
+                # ── Per-class accuracy bar ────────────────────────────────
+                with right_chart:
+                    st.markdown("#### 🎯 Per-Class Accuracy")
+                    cm_arr      = np.array(result.get("confusion_matrix", []))
+                    label_names = result.get("label_classes") or [str(i) for i in range(len(cm_arr))]
+                    if cm_arr.size:
+                        per_class_acc = cm_arr.diagonal() / cm_arr.sum(axis=1).clip(min=1)
+                        fig_pc = px.bar(
+                            x=label_names, y=per_class_acc,
+                            color=per_class_acc,
+                            color_continuous_scale=["#e74c3c","#e67e22","#2ecc71"],
+                            labels={"x": "Class", "y": "Accuracy", "color": "Acc"},
+                            title="Accuracy per class",
+                        )
+                        fig_pc.update_layout(yaxis_range=[0,1.05], showlegend=False, height=380)
+                        apply_theme(fig_pc)
+                        st.plotly_chart(fig_pc, use_container_width=True)
+
+                # ── Prediction distribution ───────────────────────────────
+                st.markdown("#### 📊 Prediction Distribution")
+                pred_df = pd.DataFrame({"Actual": y_test.astype(str), "Predicted": y_pred.astype(str)})
+                fig_dist = px.histogram(
+                    pred_df.melt(value_name="Label", var_name="Type"),
+                    x="Label", color="Type", barmode="group",
+                    color_discrete_map={"Actual": "#2ecc71", "Predicted": "#3498db"},
+                    title="Actual vs Predicted class distribution",
+                )
+                apply_theme(fig_dist)
+                st.plotly_chart(fig_dist, use_container_width=True)
+
+            else:
+                # ── Regression charts ─────────────────────────────────────
+                left_chart, right_chart = st.columns(2)
+
+                with left_chart:
+                    st.markdown("#### 🎯 Actual vs Predicted")
+                    min_val = float(min(y_test.min(), y_pred.min()))
+                    max_val = float(max(y_test.max(), y_pred.max()))
+                    fig_avp = go.Figure()
+                    fig_avp.add_trace(go.Scatter(
+                        x=y_test, y=y_pred, mode="markers",
+                        marker=dict(color="#2ecc71", opacity=0.6, size=6),
+                        name="Predictions",
+                    ))
+                    fig_avp.add_trace(go.Scatter(
+                        x=[min_val, max_val], y=[min_val, max_val],
+                        mode="lines", line=dict(color="#e74c3c", dash="dash", width=1.5),
+                        name="Perfect fit",
+                    ))
+                    fig_avp.update_layout(
+                        title="Actual vs Predicted", xaxis_title="Actual", yaxis_title="Predicted", height=380,
+                    )
+                    apply_theme(fig_avp)
+                    st.plotly_chart(fig_avp, use_container_width=True)
+
+                with right_chart:
+                    st.markdown("#### 📉 Residuals")
+                    residuals = y_test - y_pred
+                    fig_res = go.Figure()
+                    fig_res.add_trace(go.Scatter(
+                        x=y_pred, y=residuals, mode="markers",
+                        marker=dict(color="#3498db", opacity=0.6, size=6),
+                        name="Residuals",
+                    ))
+                    fig_res.add_hline(y=0, line_dash="dash", line_color="#e74c3c", line_width=1.5)
+                    fig_res.update_layout(
+                        title="Residuals vs Predicted", xaxis_title="Predicted", yaxis_title="Residual", height=380,
+                    )
+                    apply_theme(fig_res)
+                    st.plotly_chart(fig_res, use_container_width=True)
+
+                # ── Residual distribution ──────────────────────────────────
+                st.markdown("#### 📊 Residual Distribution")
+                fig_rdist = px.histogram(
+                    x=residuals, nbins=40,
+                    color_discrete_sequence=["#9b59b6"],
+                    labels={"x": "Residual", "y": "Count"},
+                    title="Distribution of residuals (closer to zero = better)",
+                )
+                apply_theme(fig_rdist)
+                st.plotly_chart(fig_rdist, use_container_width=True)
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 4 — Feature Importances
+            # ════════════════════════════════════════════════════════════════
+            fi = result.get("feature_importances")
+            if fi:
+                st.markdown("### 🔑 Feature Importances")
+                fi_df = (
+                    pd.DataFrame({"Feature": list(fi.keys()), "Importance": list(fi.values())})
+                    .sort_values("Importance", ascending=False)
+                    .head(20)
+                )
+                fig_fi = px.bar(
+                    fi_df, x="Importance", y="Feature", orientation="h",
+                    color="Importance",
+                    color_continuous_scale=["#0d2818","#2ecc71"],
+                    title=f"Top {len(fi_df)} most important features — {model_name}",
+                )
+                fig_fi.update_layout(yaxis={"autorange": "reversed"}, showlegend=False, height=max(300, len(fi_df)*28))
+                apply_theme(fig_fi)
+                st.plotly_chart(fig_fi, use_container_width=True)
 
     # ── CODE ─────────────────────────────────────────────────────────────────
     elif st.session_state.active_tab == "Code":
-        # Dynamically show code based on what was run
-        task = st.session_state.get("detected_task", "Classification")
+        task   = st.session_state.get("detected_task", "Classification")
         target = st.session_state.get("target_col", "target")
 
-        if st.session_state.single_result:
-            model_name = st.session_state.single_result["model"]
-            if task == "Classification":
-                info = CLASSIFICATION_MODELS.get(model_name, CLASSIFICATION_MODELS["Random Forest"])
-            else:
-                info = REGRESSION_MODELS.get(model_name, REGRESSION_MODELS["Random Forest"])
+        active_result = None
+        if st.session_state.single_result and "error" not in st.session_state.single_result:
+            active_result = st.session_state.single_result
+        elif st.session_state.automl_results:
+            valid = [r for r in st.session_state.automl_results if "error" not in r]
+            if valid:
+                active_result = valid[0]  # best model
+
+        if active_result:
+            model_name = active_result["model"]
+            maps = CLASSIFICATION_MODELS if task == "Classification" else REGRESSION_MODELS
+            info = maps.get(model_name, list(maps.values())[0])
             import_line  = f"from {info['module']} import {info['class']}"
             params_str   = ", ".join(f"{k}={repr(v)}" for k, v in info["params"].items())
             model_line   = f"model = {info['class']}({params_str})"
-            metric_line  = "print(classification_report(y_test, model.predict(X_test)))" if task == "Classification" else "print('R² Score:', r2_score(y_test, model.predict(X_test)))"
-            extra_import = "from sklearn.metrics import classification_report" if task == "Classification" else "from sklearn.metrics import r2_score"
+            if task == "Classification":
+                metric_imports = "from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score"
+                metric_block   = (
+                    "preds = model.predict(X_test)\n"
+                    "print('Accuracy: ', accuracy_score(y_test, preds))\n"
+                    "print('Precision:', precision_score(y_test, preds, average='weighted', zero_division=0))\n"
+                    "print('Recall:   ', recall_score(y_test, preds, average='weighted', zero_division=0))\n"
+                    "print('F1 Score: ', f1_score(y_test, preds, average='weighted', zero_division=0))"
+                )
+            else:
+                metric_imports = "from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score"
+                metric_block   = (
+                    "preds = model.predict(X_test)\n"
+                    "mse   = mean_squared_error(y_test, preds)\n"
+                    "print('MSE: ', mse)\n"
+                    "print('RMSE:', np.sqrt(mse))\n"
+                    "print('MAE: ', mean_absolute_error(y_test, preds))\n"
+                    "print('R²:  ', r2_score(y_test, preds))"
+                )
         else:
-            import_line  = "from sklearn.ensemble import RandomForestClassifier"
-            model_line   = "model = RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_split=5, random_state=42)"
-            metric_line  = "print(classification_report(y_test, model.predict(X_test)))"
-            extra_import = "from sklearn.metrics import classification_report"
+            import_line    = "from sklearn.ensemble import RandomForestClassifier"
+            model_line     = "model = RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_split=5, random_state=42)"
+            metric_imports = "from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score"
+            metric_block   = "preds = model.predict(X_test)\nprint('Accuracy:', accuracy_score(y_test, preds))"
 
         st.markdown("**Generated ML Pipeline Code**")
-        st.code(f'''import pandas as pd
+        st.code(f'''import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 {import_line}
-{extra_import}
+{metric_imports}
 
 df = pd.read_csv("your_dataset.csv")
 
@@ -698,14 +1020,20 @@ X_train, X_test, y_train, y_test = train_test_split(
 
 {model_line}
 model.fit(X_train, y_train)
-{metric_line}
+
+{metric_block}
 ''', language="python")
 
         if st.session_state.automl_results:
             st.markdown("**AutoML Comparison Results**")
-            res = st.session_state.automl_results
-            rows = [{"Model": k, "Score": f"{v[0]:.4f}" if v[0] else "Error", "Metric": v[1]} for k, v in res.items()]
-            st.dataframe(pd.DataFrame(rows).sort_values("Score", ascending=False), use_container_width=True)
+            valid = [r for r in st.session_state.automl_results if "error" not in r]
+            sort_key = "accuracy" if task == "Classification" else "r2"
+            rows = []
+            for r in valid:
+                row = {"Model": r["model"]}
+                row.update({k.upper(): f"{v:.4f}" for k, v in r["metrics"].items()})
+                rows.append(row)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # RIGHT — Insights
@@ -727,37 +1055,31 @@ with right:
 
     # ── Model Leaderboard from real results ───────────────────────────────────
     if st.session_state.automl_results:
-        results     = st.session_state.automl_results
-        valid       = {k: v for k, v in results.items() if v[0] is not None}
-        sorted_res  = sorted(valid.items(), key=lambda x: x[1][0], reverse=True)
-        medal       = ["🥇", "🥈", "🥉"]
-        board_rows  = ""
-        for i, (name, (score, metric)) in enumerate(sorted_res[:5]):
+        valid      = [r for r in st.session_state.automl_results if "error" not in r]
+        task       = valid[0]["task"] if valid else "Classification"
+        sort_key   = "accuracy" if task == "Classification" else "r2"
+        medal      = ["🥇","🥈","🥉"]
+        board_rows = ""
+        for i, r in enumerate(valid[:5]):
+            score  = r["metrics"].get(sort_key, 0)
             icon_m = medal[i] if i < 3 else "  "
             col_m  = "#2ecc71" if i == 0 else "#8b949e"
-            board_rows += f'<div class="pipeline-item" style="color:{col_m}">{icon_m} {name} — {score:.4f}</div>'
+            board_rows += f'<div class="pipeline-item" style="color:{col_m}">{icon_m} {r["model"]} — {score:.4f}</div>'
         st.markdown(f"""
         <div class="insights-panel" style="margin-top:0.8rem">
           <div class="pipeline-title">Model Leaderboard</div>
           {board_rows}
         </div>""", unsafe_allow_html=True)
 
-    elif st.session_state.single_result:
-        r = st.session_state.single_result
+    elif st.session_state.single_result and "error" not in st.session_state.single_result:
+        r    = st.session_state.single_result
+        task = r["task"]
+        key  = "accuracy" if task == "Classification" else "r2"
         st.markdown(f"""
         <div class="insights-panel" style="margin-top:0.8rem">
           <div class="pipeline-title">Selected Model Result</div>
           <div class="pipeline-item" style="color:#2ecc71">✓ {r["model"]}</div>
-          <div class="pipeline-item">{r["metric_label"]}: <strong style="color:#2ecc71">{r["score"]:.4f}</strong></div>
-        </div>""", unsafe_allow_html=True)
-
-    elif st.session_state.messages:
-        st.markdown("""
-        <div class="insights-panel" style="margin-top:0.5rem">
-          <div class="pipeline-title">Model Leaderboard</div>
-          <div class="pipeline-item" style="color:#2ecc71">🥇 XGBoost — 91.4% AUC</div>
-          <div class="pipeline-item" style="color:#8b949e">🥈 LightGBM — 90.8% AUC</div>
-          <div class="pipeline-item" style="color:#8b949e">🥉 RandomForest — 89.2% AUC</div>
+          {''.join(f'<div class="pipeline-item">{k.upper()}: <strong style="color:#2ecc71">{v:.4f}</strong></div>' for k,v in r["metrics"].items())}
         </div>""", unsafe_allow_html=True)
 
     # Quick dataset stats
