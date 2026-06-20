@@ -102,6 +102,12 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "uploaded_df" not in st.session_state:
     st.session_state.uploaded_df = None
+if "show_target_dist" not in st.session_state:
+    st.session_state.show_target_dist = False
+if "show_corr" not in st.session_state:
+    st.session_state.show_corr = False
+if "show_missing" not in st.session_state:
+    st.session_state.show_missing = False
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
@@ -131,10 +137,10 @@ with st.sidebar:
 st.title("🧪 AutoML Agent")
 st.markdown("Upload a CSV dataset, train models, and explore results with AI.")
 
-tab_upload, tab_results, tab_explain, tab_chat = st.tabs([
+tab_upload, tab_results, tab_analysis, tab_chat = st.tabs([
     "📤 Upload & Configure",
     "📊 Results",
-    "🔍 Explainability",
+    "📈 Analysis",
     "💬 Gemini Chat",
 ])
 
@@ -183,82 +189,143 @@ with tab_upload:
 
         st.divider()
 
-        if st.button("🚀 Run AutoML", type="primary", use_container_width=True):
-            with st.spinner("Training models… this may take a moment."):
+        # Model Selection Section
+        st.markdown("### 🤖 Model Selection")
+        
+        train_mode = st.radio(
+            "Choose training mode:",
+            options=["Train all models", "Train a specific model"],
+            horizontal=True,
+            help="Select whether to train all available models or focus on a specific model"
+        )
+        
+        selected_model = None
+        if train_mode == "Train a specific model":
+            with st.spinner("Fetching available models..."):
                 try:
-                    # Save uploaded file temporarily for FastAPI
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-                        df.to_csv(tmp.name, index=False)
-                        tmp_path = tmp.name
+                    models_response = requests.get(
+                        f"{FASTAPI_BASE_URL}/available-models",
+                        params={"task": task_override}
+                    )
                     
-                    # Send to FastAPI for training
-                    with open(tmp_path, 'rb') as f:
-                        files = {'file': f}
-                        params = {'target_column': target_col}
+                    if models_response.status_code == 200:
+                        models_data = models_response.json()
+                        available_models = models_data.get('models', [])
                         
-                        # Step 1: Upload data
-                        upload_response = requests.post(
-                            f"{FASTAPI_BASE_URL}/upload-data",
-                            files=files,
-                            params=params
+                        selected_model = st.selectbox(
+                            "Select a model to train:",
+                            options=available_models,
+                            help="Choose which model you want to train"
                         )
+                    else:
+                        st.error("Failed to fetch available models")
+                except Exception as e:
+                    st.error(f"Error fetching models: {e}")
+        
+        st.divider()
+
+        if st.button("🚀 Run AutoML", type="primary", use_container_width=True):
+            # Validate selection
+            if train_mode == "Train a specific model" and selected_model is None:
+                st.error("❌ Please select a model to train")
+            else:
+                with st.spinner("Training models… this may take a moment."):
+                    try:
+                        # Save uploaded file temporarily for FastAPI
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                            df.to_csv(tmp.name, index=False)
+                            tmp_path = tmp.name
                         
-                        if upload_response.status_code != 200:
-                            st.error(f"❌ Upload failed: {upload_response.json()}")
-                            raise Exception("Data upload failed")
-                        
-                        upload_data = upload_response.json()
-                        dataset_id = upload_data.get('dataset_id')
-                        
-                        # Step 2: Train all models
-                        train_response = requests.post(
-                            f"{FASTAPI_BASE_URL}/train-all-models",
-                            params={
-                                'dataset_id': dataset_id,
-                                'target_column': target_col,
-                                'test_size': 0.2,
-                                'async_training': False
+                        # Send to FastAPI for training
+                        with open(tmp_path, 'rb') as f:
+                            files = {'file': f}
+                            params = {'target_column': target_col}
+                            
+                            # Step 1: Upload data
+                            upload_response = requests.post(
+                                f"{FASTAPI_BASE_URL}/upload-data",
+                                files=files,
+                                params=params
+                            )
+                            
+                            if upload_response.status_code != 200:
+                                st.error(f"❌ Upload failed: {upload_response.json()}")
+                                raise Exception("Data upload failed")
+                            
+                            upload_data = upload_response.json()
+                            dataset_id = upload_data.get('dataset_id')
+                            
+                            # Step 2: Train models (all or specific)
+                            if train_mode == "Train all models":
+                                train_response = requests.post(
+                                    f"{FASTAPI_BASE_URL}/train-all-models",
+                                    params={
+                                        'dataset_id': dataset_id,
+                                        'target_column': target_col,
+                                        'test_size': 0.2,
+                                        'async_training': False
+                                    }
+                                )
+                            else:  # Train a specific model
+                                train_response = requests.post(
+                                    f"{FASTAPI_BASE_URL}/train-model",
+                                    params={
+                                        'model_name': selected_model,
+                                        'target_column': target_col,
+                                        'test_size': 0.2,
+                                        'dataset_id': dataset_id,
+                                        'async_training': False
+                                    }
+                                )
+                            
+                            if train_response.status_code != 200:
+                                st.error(f"❌ Training failed: {train_response.json()}")
+                                raise Exception("Model training failed")
+                            
+                            train_data = train_response.json()
+                            
+                            # Step 3: Parse and store results
+                            if train_mode == "Train all models":
+                                leaderboard = train_data.get('leaderboard', [])
+                                detailed_results = train_data.get('detailed_results', {})
+                                best_model_name = max(leaderboard, key=lambda x: x['score'])['model']
+                                best_result = detailed_results[best_model_name]
+                            else:
+                                # For single model, format as leaderboard with one entry
+                                best_model_name = train_data.get('model_name', selected_model)
+                                leaderboard = [{"model": best_model_name, "score": train_data.get('score', 0)}]
+                                detailed_results = {best_model_name: train_data}
+                                best_result = train_data
+                            
+                            task_type = train_data.get('task')
+                            best_metrics = best_result.get('metrics', {})
+                            
+                            st.session_state.result = {
+                                "task_type": task_type,
+                                "best_model_name": best_model_name,
+                                "best_metrics": best_metrics,
+                                "results": detailed_results,
+                                "leaderboard": leaderboard,
+                                "dataset_id": dataset_id,
+                                "y_test": best_result.get('y_true', []),  # Store test labels
+                                "y_pred": best_result.get('y_pred', []),  # Store predictions
                             }
-                        )
-                        
-                        if train_response.status_code != 200:
-                            st.error(f"❌ Training failed: {train_response.json()}")
-                            raise Exception("Model training failed")
-                        
-                        train_data = train_response.json()
-                        
-                        # Step 3: Parse and store results
-                        leaderboard = train_data.get('leaderboard', [])
-                        detailed_results = train_data.get('detailed_results', {})
-                        task_type = train_data.get('task')
-                        
-                        best_model_name = max(leaderboard, key=lambda x: x['score'])['model']
-                        best_metrics = detailed_results[best_model_name]['metrics']
-                        
-                        st.session_state.result = {
-                            "task_type": task_type,
-                            "best_model_name": best_model_name,
-                            "best_metrics": best_metrics,
-                            "results": detailed_results,
-                            "leaderboard": leaderboard,
-                            "dataset_id": dataset_id,
-                        }
-                        st.session_state.chat_history = []
-                        
-                        st.success(f"✅ Training complete! Best model: **{best_model_name}**")
-                        st.rerun()
-                
-                except Exception as exc:
-                    st.error(f"❌ AutoML failed: {exc}")
-                finally:
-                    # Clean up temp file
-                    import os
-                    if 'tmp_path' in locals():
-                        try:
-                            os.unlink(tmp_path)
-                        except:
-                            pass
+                            st.session_state.chat_history = []
+                            
+                            st.success(f"✅ Training complete! Best model: **{best_model_name}**")
+                            st.rerun()
+                    
+                    except Exception as exc:
+                        st.error(f"❌ AutoML failed: {exc}")
+                    finally:
+                        # Clean up temp file
+                        import os
+                        if 'tmp_path' in locals():
+                            try:
+                                os.unlink(tmp_path)
+                            except:
+                                pass
 
     else:
         st.info("👆 Upload a CSV file to get started.")
@@ -308,15 +375,143 @@ with tab_results:
         # Placeholder for future features
         st.info("💡 **Coming Soon:** Visualizations, feature importance, and overfitting analysis will be added here.")
 
-# ── Tab 3: Explainability ────────────────────────────────────────────────────
+# ── Tab 3: Analysis ──────────────────────────────────────────────────────
 
-with tab_explain:
+with tab_analysis:
     if st.session_state.result is None:
-        st.info("Run AutoML first to see explainability analysis.")
+        st.info("Run AutoML first to see data analysis and diagnostics.")
     else:
         res = st.session_state.result
         
-        st.info("📊 **Explainability features coming soon!**\n\nWe'll add feature importance, visualizations, and diagnostic plots here.")
+        # Import visualization functions
+        from Backend.visualization import (
+            plot_target_distribution,
+            plot_correlation_matrix,
+            plot_missing_values,
+            plot_feature_importance,
+            plot_confusion_matrix,
+            plot_regression_diagnostics,
+        )
+        from Backend.analytics import extract_feature_importance
+        from Backend.preprocessor import identify_feature_types
+        
+        # Get numeric and categorical columns
+        numeric_cols, categorical_cols = identify_feature_types(
+            st.session_state.uploaded_df, 
+            st.session_state.uploaded_df.columns[-1]  # Target is last column
+        )
+        
+        # ── EDA Section ──
+        st.markdown("### 📈 Exploratory Data Analysis")
+        
+        eda_col1, eda_col2, eda_col3 = st.columns(3)
+        
+        with eda_col1:
+            if st.button("📊 Target Distribution", key="btn_target_dist"):
+                st.session_state.show_target_dist = True
+        
+        with eda_col2:
+            if st.button("🔗 Correlations", key="btn_corr"):
+                st.session_state.show_corr = True
+        
+        with eda_col3:
+            if st.button("⚠️ Missing Values", key="btn_missing"):
+                st.session_state.show_missing = True
+        
+        # Display EDA plots
+        if st.session_state.get('show_target_dist', False):
+            try:
+                fig = plot_target_distribution(
+                    st.session_state.uploaded_df,
+                    st.session_state.uploaded_df.columns[-1],
+                    res['task_type']
+                )
+                st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Error plotting target distribution: {e}")
+        
+        if st.session_state.get('show_corr', False):
+            try:
+                fig = plot_correlation_matrix(st.session_state.uploaded_df, st.session_state.uploaded_df.columns[-1])
+                st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Error plotting correlation matrix: {e}")
+        
+        if st.session_state.get('show_missing', False):
+            try:
+                fig = plot_missing_values(st.session_state.uploaded_df, st.session_state.uploaded_df.columns[-1])
+                if fig is not None:
+                    st.pyplot(fig)
+                else:
+                    st.success("✅ No missing values in the dataset!")
+            except Exception as e:
+                st.error(f"Error plotting missing values: {e}")
+        
+        st.divider()
+        
+        # ── Model Diagnostics Section ──
+        st.markdown("### 🔬 Model Diagnostics")
+        
+        # Check if we have predictions
+        if 'y_test' in res and 'y_pred' in res:
+            y_test = res.get('y_test', [])
+            y_pred = res.get('y_pred', [])
+            
+            if res['task_type'] == "classification":
+                try:
+                    fig = plot_confusion_matrix(y_test, y_pred)
+                    st.subheader("Confusion Matrix")
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.warning(f"Could not generate confusion matrix: {e}")
+            else:
+                try:
+                    fig = plot_regression_diagnostics(y_test, y_pred)
+                    st.subheader("Regression Diagnostics")
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.warning(f"Could not generate regression diagnostics: {e}")
+        else:
+            st.info("💡 Prediction data not yet available. Train models to see diagnostics.")
+        
+        st.divider()
+        
+        # ── Feature Importance Section ──
+        st.markdown("### ⭐ Feature Importance")
+        
+        if 'y_test' in res and 'y_pred' in res and st.session_state.uploaded_df is not None:
+            y_test = res.get('y_test', [])
+            y_pred = res.get('y_pred', [])
+            feature_names = [col for col in st.session_state.uploaded_df.columns if col != st.session_state.uploaded_df.columns[-1]]
+            
+            try:
+                # Extract and display feature importance
+                importance_df = extract_feature_importance(
+                    None,  # Model not needed for permutation importance fallback
+                    st.session_state.uploaded_df[feature_names].values,
+                    y_test,
+                    feature_names,
+                    res['task_type']
+                )
+                
+                col_imp_table, col_imp_chart = st.columns([1, 1])
+                
+                with col_imp_table:
+                    st.subheader("Top Features by Importance")
+                    st.dataframe(importance_df.head(10), use_container_width=True, hide_index=True)
+                
+                with col_imp_chart:
+                    st.subheader("Feature Importance Distribution")
+                    try:
+                        fig = plot_feature_importance(importance_df, feature_names)
+                        st.pyplot(fig)
+                    except Exception as e:
+                        st.info("Feature importance plot unavailable")
+                        
+            except Exception as e:
+                st.info("⏳ Feature importance analysis available after model training")
+        else:
+            st.info("⏳ Train models first to see feature importance analysis")
 
 # ── Tab 4: Gemini Chat ──────────────────────────────────────────────────────
 
