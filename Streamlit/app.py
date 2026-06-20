@@ -12,6 +12,7 @@ Layout:
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -20,16 +21,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from automl.orchestrator import run_automl
-from llm.gemini_client import ask_gemini
-from llm.prompts import (
-    SUGGESTED_QUESTIONS,
-    SYSTEM_PROMPT,
-    build_experiment_context,
-    build_user_prompt,
-)
+import requests
+import numpy as np
 
 OUTPUT_DIR = "outputs"
+FASTAPI_BASE_URL = "http://localhost:8000"
+
+SUGGESTED_QUESTIONS = [
+    "What are the top 3 important features?",
+    "Is the model overfitting?",
+    "What recommendations do you have?",
+    "How balanced is the dataset?",
+]
 
 # ── Page config ──────────────────────────────────────────────────────────────
 
@@ -117,42 +120,10 @@ with st.sidebar:
 
     if st.session_state.result is not None:
         res = st.session_state.result
-        st.markdown("### 📥 Downloads")
-
-        # Report
-        report_path = Path(res.report_path)
-        if report_path.exists():
-            st.download_button(
-                "📄 Download Report",
-                data=report_path.read_text(encoding="utf-8"),
-                file_name="report.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
-
-        # Leaderboard CSV
-        lb_path = Path(res.leaderboard_path)
-        if lb_path.exists():
-            st.download_button(
-                "📊 Download Leaderboard",
-                data=lb_path.read_bytes(),
-                file_name="leaderboard.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-
-        # Best model
-        model_path = Path(res.model_path)
-        if model_path.exists():
-            st.download_button(
-                "🤖 Download Model (.joblib)",
-                data=model_path.read_bytes(),
-                file_name="best_model.joblib",
-                mime="application/octet-stream",
-                use_container_width=True,
-            )
-
-    st.divider()
+        st.markdown("### � Best Model Results")
+        st.markdown(f"**Best Model:** {res['best_model_name']}")
+        st.markdown(f"**Score:** {res['best_metrics'].get('f1', res['best_metrics'].get('r2', 'N/A')):.4f}")
+        st.divider()
     st.caption("Built with ❤️ by Sara Musalim | Streamlit + scikit-learn + Gemini")
 
 # ── Main content ─────────────────────────────────────────────────────────────
@@ -202,14 +173,12 @@ with tab_upload:
             )
 
         with cfg_col2:
-            from automl.preprocessor import detect_task_type
-
-            detected = detect_task_type(df[target_col])
+            # Task will be auto-detected by FastAPI based on target column
             task_override = st.selectbox(
                 "📋 Task Type",
                 options=["classification", "regression"],
-                index=0 if detected == "classification" else 1,
-                help=f"Auto-detected: {detected}. Override if needed.",
+                index=0,
+                help="Auto-detected by backend. Override if needed.",
             )
 
         st.divider()
@@ -217,20 +186,79 @@ with tab_upload:
         if st.button("🚀 Run AutoML", type="primary", use_container_width=True):
             with st.spinner("Training models… this may take a moment."):
                 try:
-                    result = run_automl(
-                        df=df,
-                        target_col=target_col,
-                        task_type=task_override,
-                        output_dir=OUTPUT_DIR,
-                    )
-                    st.session_state.result = result
-                    st.session_state.chat_history = []
-                    st.success(
-                        f"✅ Training complete! Best model: **{result.best_model_name}**"
-                    )
-                    st.rerun()
+                    # Save uploaded file temporarily for FastAPI
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                        df.to_csv(tmp.name, index=False)
+                        tmp_path = tmp.name
+                    
+                    # Send to FastAPI for training
+                    with open(tmp_path, 'rb') as f:
+                        files = {'file': f}
+                        params = {'target_column': target_col}
+                        
+                        # Step 1: Upload data
+                        upload_response = requests.post(
+                            f"{FASTAPI_BASE_URL}/upload-data",
+                            files=files,
+                            params=params
+                        )
+                        
+                        if upload_response.status_code != 200:
+                            st.error(f"❌ Upload failed: {upload_response.json()}")
+                            raise Exception("Data upload failed")
+                        
+                        upload_data = upload_response.json()
+                        dataset_id = upload_data.get('dataset_id')
+                        
+                        # Step 2: Train all models
+                        train_response = requests.post(
+                            f"{FASTAPI_BASE_URL}/train-all-models",
+                            params={
+                                'dataset_id': dataset_id,
+                                'target_column': target_col,
+                                'test_size': 0.2,
+                                'async_training': False
+                            }
+                        )
+                        
+                        if train_response.status_code != 200:
+                            st.error(f"❌ Training failed: {train_response.json()}")
+                            raise Exception("Model training failed")
+                        
+                        train_data = train_response.json()
+                        
+                        # Step 3: Parse and store results
+                        leaderboard = train_data.get('leaderboard', [])
+                        detailed_results = train_data.get('detailed_results', {})
+                        task_type = train_data.get('task')
+                        
+                        best_model_name = max(leaderboard, key=lambda x: x['score'])['model']
+                        best_metrics = detailed_results[best_model_name]['metrics']
+                        
+                        st.session_state.result = {
+                            "task_type": task_type,
+                            "best_model_name": best_model_name,
+                            "best_metrics": best_metrics,
+                            "results": detailed_results,
+                            "leaderboard": leaderboard,
+                            "dataset_id": dataset_id,
+                        }
+                        st.session_state.chat_history = []
+                        
+                        st.success(f"✅ Training complete! Best model: **{best_model_name}**")
+                        st.rerun()
+                
                 except Exception as exc:
                     st.error(f"❌ AutoML failed: {exc}")
+                finally:
+                    # Clean up temp file
+                    import os
+                    if 'tmp_path' in locals():
+                        try:
+                            os.unlink(tmp_path)
+                        except:
+                            pass
 
     else:
         st.info("👆 Upload a CSV file to get started.")
@@ -244,174 +272,51 @@ with tab_results:
         res = st.session_state.result
 
         st.markdown("### 🏆 Model Leaderboard")
-        st.dataframe(
-            res.leaderboard.style.format(precision=4),
-            use_container_width=True,
-        )
-
-        # Model comparison chart
-        comparison_fig = res.plot_figures.get("model_comparison")
-        if comparison_fig is not None:
-            st.pyplot(comparison_fig)
+        leaderboard_df = pd.DataFrame(res["leaderboard"])
+        st.dataframe(leaderboard_df.style.format(precision=4), use_container_width=True)
 
         st.divider()
         st.markdown("### 🥇 Best Model")
 
-        if res.task_type == "classification":
+        best_name = res["best_model_name"]
+        best_metrics = res["best_metrics"]
+
+        if res["task_type"] == "classification":
             m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-            m_col1.metric("Model", res.best_model_name)
-            m_col2.metric("Weighted F1", res.best_metrics.get("weighted_f1", "N/A"))
-            m_col3.metric("Accuracy", res.best_metrics.get("accuracy", "N/A"))
-            m_col4.metric("Precision", res.best_metrics.get("weighted_precision", "N/A"))
+            m_col1.metric("Model", best_name)
+            m_col2.metric("F1 Score", f"{best_metrics.get('f1', 'N/A'):.4f}")
+            m_col3.metric("Accuracy", f"{best_metrics.get('accuracy', 'N/A'):.4f}")
+            m_col4.metric("Precision", f"{best_metrics.get('precision', 'N/A'):.4f}")
         else:
             m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-            m_col1.metric("Model", res.best_model_name)
-            m_col2.metric("RMSE", res.best_metrics.get("rmse", "N/A"))
-            m_col3.metric("R²", res.best_metrics.get("r2", "N/A"))
-            m_col4.metric("MAPE %", res.best_metrics.get("mape_pct", "N/A"))
-
-        # Per-class breakdown
-        if res.per_class_df is not None and not res.per_class_df.empty:
-            with st.expander("📋 Per-Class Metrics"):
-                st.dataframe(
-                    res.per_class_df.style.format(precision=4),
-                    use_container_width=True,
-                )
+            m_col1.metric("Model", best_name)
+            m_col2.metric("R²", f"{best_metrics.get('r2', 'N/A'):.4f}")
+            m_col3.metric("RMSE", f"{best_metrics.get('rmse', 'N/A'):.4f}")
+            m_col4.metric("MAE", f"{best_metrics.get('mae', 'N/A'):.4f}")
 
         st.divider()
 
-        # Overfitting analysis
-        st.markdown("### 🔬 Model Health")
+        st.markdown("### 📋 All Model Metrics")
+        metrics_display = pd.DataFrame([
+            {"Model": name, **res["results"][name]["metrics"]}
+            for name in res["results"].keys()
+        ])
+        st.dataframe(metrics_display, use_container_width=True)
 
-        ov = res.best_overfit
-        cv = res.best_cv
-
-        if ov:
-            risk_emoji = {"low": "🟢", "moderate": "🟡", "high": "🔴"}.get(
-                ov.get("risk_level", ""), "⚪"
-            )
-            h_col1, h_col2, h_col3, h_col4 = st.columns(4)
-            h_col1.metric("Overfit Risk", f"{risk_emoji} {ov.get('risk_level', 'N/A').title()}")
-            h_col2.metric(f"Train {ov.get('metric_name', 'Score')}", ov.get("train_score", "N/A"))
-            h_col3.metric(f"Test {ov.get('metric_name', 'Score')}", ov.get("test_score", "N/A"))
-            h_col4.metric("Gap", ov.get("gap", "N/A"))
-
-            if ov.get("verdict"):
-                st.caption(ov["verdict"])
-
-        if cv and cv.get("cv_mean") is not None:
-            cv_metric = "Weighted F1" if res.task_type == "classification" else "RMSE"
-            cv_col1, cv_col2 = st.columns(2)
-            cv_col1.metric(f"CV Mean ({cv_metric})", cv["cv_mean"])
-            cv_col2.metric("CV Std", f"±{cv['cv_std']}")
-
-            fold_scores = cv.get("cv_scores", [])
-            if fold_scores:
-                st.caption(f"Fold scores: {', '.join(f'{s:.4f}' for s in fold_scores)}")
-
-        # Dataset summary
         st.divider()
-        st.markdown("### 📋 Dataset Summary")
-        ds = res.dataset_summary
-        ds_col1, ds_col2, ds_col3 = st.columns(3)
-        ds_col1.metric("Rows", f"{ds['rows']:,}")
-        ds_col2.metric("Features", ds["features"])
-        ds_col3.metric("Task", res.task_type.title())
 
-        # Data quality warnings
-        dq = res.data_quality
-        if dq:
-            warnings = []
-            if dq.get("duplicate_rows", 0) > 0:
-                warnings.append(f"⚠️ {dq['duplicate_rows']} duplicate rows found")
-            balance = dq.get("class_balance")
-            if balance and balance.get("is_imbalanced"):
-                warnings.append(f"⚠️ Class imbalance detected (ratio: {balance['imbalance_ratio']:.1f}x)")
-            if dq.get("high_cardinality_columns"):
-                n = len(dq["high_cardinality_columns"])
-                warnings.append(f"⚠️ {n} high-cardinality categorical column(s)")
-            if warnings:
-                for w in warnings:
-                    st.warning(w)
+        # Placeholder for future features
+        st.info("💡 **Coming Soon:** Visualizations, feature importance, and overfitting analysis will be added here.")
 
 # ── Tab 3: Explainability ────────────────────────────────────────────────────
 
 with tab_explain:
     if st.session_state.result is None:
-        st.info("Run AutoML first to see explainability plots.")
+        st.info("Run AutoML first to see explainability analysis.")
     else:
         res = st.session_state.result
-
-        # EDA section
-        st.markdown("### 📈 Exploratory Data Analysis")
-
-        eda_tab1, eda_tab2, eda_tab3 = st.tabs([
-            "Target Distribution", "Correlations", "Missing Values"
-        ])
-
-        with eda_tab1:
-            fig = res.plot_figures.get("target_distribution")
-            if fig is not None:
-                st.pyplot(fig)
-
-        with eda_tab2:
-            fig = res.plot_figures.get("correlation")
-            if fig is not None:
-                st.pyplot(fig)
-
-        with eda_tab3:
-            fig = res.plot_figures.get("missing_values")
-            if fig is not None:
-                st.pyplot(fig)
-            else:
-                st.success("No missing values in the dataset ✅")
-
-        st.divider()
-
-        # Feature importance
-        st.markdown("### 📊 Feature Importance")
-        fi_fig = res.plot_figures.get("feature_importance")
-        if fi_fig is not None:
-            st.pyplot(fi_fig)
-
-        if res.feature_importance_df is not None:
-            with st.expander("View feature importance table"):
-                st.dataframe(
-                    res.feature_importance_df.head(15).style.format(
-                        {"Importance": "{:.4f}"}
-                    ),
-                    use_container_width=True,
-                )
-
-        st.divider()
-
-        # Diagnostic plots
-        if res.task_type == "classification":
-            diag_tab1, diag_tab2 = st.tabs(["Confusion Matrix", "ROC Curve"])
-
-            with diag_tab1:
-                fig = res.plot_figures.get("diagnostic")
-                if fig is not None:
-                    st.pyplot(fig)
-
-            with diag_tab2:
-                fig = res.plot_figures.get("roc")
-                if fig is not None:
-                    st.pyplot(fig)
-                else:
-                    st.info("ROC curve not available for this model type.")
-        else:
-            diag_tab1, diag_tab2 = st.tabs(["Predicted vs Actual", "Residual Analysis"])
-
-            with diag_tab1:
-                fig = res.plot_figures.get("diagnostic")
-                if fig is not None:
-                    st.pyplot(fig)
-
-            with diag_tab2:
-                fig = res.plot_figures.get("residual")
-                if fig is not None:
-                    st.pyplot(fig)
+        
+        st.info("📊 **Explainability features coming soon!**\n\nWe'll add feature importance, visualizations, and diagnostic plots here.")
 
 # ── Tab 4: Gemini Chat ──────────────────────────────────────────────────────
 
@@ -420,20 +325,6 @@ with tab_chat:
         st.info("Run AutoML first to chat with Gemini about your results.")
     else:
         res = st.session_state.result
-
-        # Build context once
-        fi_str = ""
-        if res.feature_importance_df is not None:
-            fi_str = res.feature_importance_df.head(10).to_string(index=False)
-
-        context = build_experiment_context(
-            dataset_summary=res.dataset_summary,
-            task_type=res.task_type,
-            leaderboard_str=res.leaderboard.to_string(),
-            best_model_name=res.best_model_name,
-            metrics=res.best_metrics,
-            feature_importance_str=fi_str,
-        )
 
         # Suggested questions
         st.markdown("#### 💡 Suggested Questions")
@@ -444,8 +335,17 @@ with tab_chat:
                     {"role": "user", "content": question}
                 )
                 with st.spinner("Asking Gemini…"):
-                    prompt = build_user_prompt(context, question)
-                    answer = ask_gemini(SYSTEM_PROMPT, prompt)
+                    try:
+                        response = requests.post(
+                            f"{FASTAPI_BASE_URL}/chat",
+                            params={"message": question}
+                        )
+                        if response.status_code == 200:
+                            answer = response.json()["response"]
+                        else:
+                            answer = f"Error: {response.json().get('detail', 'Unknown error')}"
+                    except Exception as exc:
+                        answer = f"Connection error: {exc}"
                 st.session_state.chat_history.append(
                     {"role": "assistant", "content": answer}
                 )
@@ -469,8 +369,17 @@ with tab_chat:
 
             with st.chat_message("assistant"):
                 with st.spinner("Thinking…"):
-                    prompt = build_user_prompt(context, user_input)
-                    answer = ask_gemini(SYSTEM_PROMPT, prompt)
+                    try:
+                        response = requests.post(
+                            f"{FASTAPI_BASE_URL}/chat",
+                            params={"message": user_input}
+                        )
+                        if response.status_code == 200:
+                            answer = response.json()["response"]
+                        else:
+                            answer = f"Error: {response.json().get('detail', 'Unknown error')}"
+                    except Exception as exc:
+                        answer = f"Connection error: {exc}"
                 st.markdown(answer)
 
             st.session_state.chat_history.append(
