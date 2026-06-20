@@ -5,24 +5,25 @@ Layout:
   Sidebar  → Instructions, dataset info, download actions
   Tab 1    → Upload & Configure
   Tab 2    → Results (leaderboard + best model card + overfit + CV)
-  Tab 3    → Explainability (EDA + feature importance + diagnostics)
+  Tab 3    → Analysis (EDA + diagnostics + feature importance)
   Tab 4    → Gemini Chat
 """
 
 from __future__ import annotations
 
-import io
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import requests
-import numpy as np
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR))
 
 OUTPUT_DIR = "outputs"
 FASTAPI_BASE_URL = "http://localhost:8000"
@@ -34,7 +35,7 @@ SUGGESTED_QUESTIONS = [
     "How balanced is the dataset?",
 ]
 
-# ── Page config ──────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="AutoML Agent",
@@ -43,7 +44,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom theme ─────────────────────────────────────────────────────────────
+# ── Custom theme ──────────────────────────────────────────────────────────────
 
 st.markdown("""
 <style>
@@ -94,7 +95,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Session state init ───────────────────────────────────────────────────────
+# ── Session state init ────────────────────────────────────────────────────────
 
 if "result" not in st.session_state:
     st.session_state.result = None
@@ -102,14 +103,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "uploaded_df" not in st.session_state:
     st.session_state.uploaded_df = None
-if "show_target_dist" not in st.session_state:
-    st.session_state.show_target_dist = False
-if "show_corr" not in st.session_state:
-    st.session_state.show_corr = False
-if "show_missing" not in st.session_state:
-    st.session_state.show_missing = False
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.markdown("## 🧪 AutoML Agent")
@@ -126,13 +121,16 @@ with st.sidebar:
 
     if st.session_state.result is not None:
         res = st.session_state.result
-        st.markdown("### � Best Model Results")
+        st.markdown("### 🏆 Best Model Results")
         st.markdown(f"**Best Model:** {res['best_model_name']}")
-        st.markdown(f"**Score:** {res['best_metrics'].get('f1', res['best_metrics'].get('r2', 'N/A')):.4f}")
+        score_val = res['best_metrics'].get('f1', res['best_metrics'].get('r2', None))
+        if score_val is not None:
+            st.markdown(f"**Score:** {score_val:.4f}")
         st.divider()
+
     st.caption("Built with ❤️ by Sara Musalim | Streamlit + scikit-learn + Gemini")
 
-# ── Main content ─────────────────────────────────────────────────────────────
+# ── Main content ──────────────────────────────────────────────────────────────
 
 st.title("🧪 AutoML Agent")
 st.markdown("Upload a CSV dataset, train models, and explore results with AI.")
@@ -144,7 +142,7 @@ tab_upload, tab_results, tab_analysis, tab_chat = st.tabs([
     "💬 Gemini Chat",
 ])
 
-# ── Tab 1: Upload & Configure ───────────────────────────────────────────────
+# ── Tab 1: Upload & Configure ─────────────────────────────────────────────────
 
 with tab_upload:
     uploaded_file = st.file_uploader(
@@ -179,7 +177,6 @@ with tab_upload:
             )
 
         with cfg_col2:
-            # Task will be auto-detected by FastAPI based on target column
             task_override = st.selectbox(
                 "📋 Task Type",
                 options=["classification", "regression"],
@@ -189,118 +186,109 @@ with tab_upload:
 
         st.divider()
 
-        # Model Selection Section
         st.markdown("### 🤖 Model Selection")
-        
+
         train_mode = st.radio(
             "Choose training mode:",
             options=["Train all models", "Train a specific model"],
             horizontal=True,
-            help="Select whether to train all available models or focus on a specific model"
+            help="Select whether to train all available models or focus on a specific model",
         )
-        
+
         selected_model = None
         if train_mode == "Train a specific model":
             with st.spinner("Fetching available models..."):
                 try:
                     models_response = requests.get(
                         f"{FASTAPI_BASE_URL}/available-models",
-                        params={"task": task_override}
+                        params={"task": task_override},
                     )
-                    
                     if models_response.status_code == 200:
                         models_data = models_response.json()
-                        available_models = models_data.get('models', [])
-                        
+                        available_models = models_data.get("models", [])
                         selected_model = st.selectbox(
                             "Select a model to train:",
                             options=available_models,
-                            help="Choose which model you want to train"
+                            help="Choose which model you want to train",
                         )
                     else:
                         st.error("Failed to fetch available models")
                 except Exception as e:
                     st.error(f"Error fetching models: {e}")
-        
+
         st.divider()
 
         if st.button("🚀 Run AutoML", type="primary", use_container_width=True):
-            # Validate selection
             if train_mode == "Train a specific model" and selected_model is None:
                 st.error("❌ Please select a model to train")
             else:
                 with st.spinner("Training models… this may take a moment."):
                     try:
-                        # Save uploaded file temporarily for FastAPI
+                        import os
                         import tempfile
+
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
                             df.to_csv(tmp.name, index=False)
                             tmp_path = tmp.name
-                        
-                        # Send to FastAPI for training
-                        with open(tmp_path, 'rb') as f:
-                            files = {'file': f}
-                            params = {'target_column': target_col}
-                            
-                            # Step 1: Upload data
+
+                        with open(tmp_path, "rb") as f:
+                            files = {"file": f}
+                            params = {"target_column": target_col}
+
                             upload_response = requests.post(
                                 f"{FASTAPI_BASE_URL}/upload-data",
                                 files=files,
-                                params=params
+                                params=params,
                             )
-                            
                             if upload_response.status_code != 200:
                                 st.error(f"❌ Upload failed: {upload_response.json()}")
                                 raise Exception("Data upload failed")
-                            
+
                             upload_data = upload_response.json()
-                            dataset_id = upload_data.get('dataset_id')
-                            
-                            # Step 2: Train models (all or specific)
+                            dataset_id = upload_data.get("dataset_id")
+
                             if train_mode == "Train all models":
                                 train_response = requests.post(
                                     f"{FASTAPI_BASE_URL}/train-all-models",
                                     params={
-                                        'dataset_id': dataset_id,
-                                        'target_column': target_col,
-                                        'test_size': 0.2,
-                                        'async_training': False
-                                    }
+                                        "dataset_id": dataset_id,
+                                        "target_column": target_col,
+                                        "test_size": 0.2,
+                                        "async_training": False,
+                                    },
                                 )
-                            else:  # Train a specific model
+                            else:
                                 train_response = requests.post(
                                     f"{FASTAPI_BASE_URL}/train-model",
                                     params={
-                                        'model_name': selected_model,
-                                        'target_column': target_col,
-                                        'test_size': 0.2,
-                                        'dataset_id': dataset_id,
-                                        'async_training': False
-                                    }
+                                        "model_name": selected_model,
+                                        "target_column": target_col,
+                                        "test_size": 0.2,
+                                        "dataset_id": dataset_id,
+                                        "async_training": False,
+                                    },
                                 )
-                            
+
                             if train_response.status_code != 200:
                                 st.error(f"❌ Training failed: {train_response.json()}")
                                 raise Exception("Model training failed")
-                            
+
                             train_data = train_response.json()
-                            
-                            # Step 3: Parse and store results
+
                             if train_mode == "Train all models":
-                                leaderboard = train_data.get('leaderboard', [])
-                                detailed_results = train_data.get('detailed_results', {})
-                                best_model_name = max(leaderboard, key=lambda x: x['score'])['model']
+                                leaderboard = train_data.get("leaderboard", [])
+                                detailed_results = train_data.get("detailed_results", {})
+                                best_model_name = max(leaderboard, key=lambda x: x["score"])["model"]
                                 best_result = detailed_results[best_model_name]
                             else:
-                                # For single model, format as leaderboard with one entry
-                                best_model_name = train_data.get('model_name', selected_model)
-                                leaderboard = [{"model": best_model_name, "score": train_data.get('score', 0)}]
+                                best_model_name = train_data.get("model_name", selected_model)
+                                leaderboard = [{"model": best_model_name, "score": train_data.get("score", 0)}]
                                 detailed_results = {best_model_name: train_data}
                                 best_result = train_data
-                            
-                            task_type = train_data.get('task')
-                            best_metrics = best_result.get('metrics', {})
-                            
+
+                            task_type = train_data.get("task")
+                            best_metrics = best_result.get("metrics", {})
+
                             st.session_state.result = {
                                 "task_type": task_type,
                                 "best_model_name": best_model_name,
@@ -308,29 +296,32 @@ with tab_upload:
                                 "results": detailed_results,
                                 "leaderboard": leaderboard,
                                 "dataset_id": dataset_id,
-                                "y_test": best_result.get('y_true', []),  # Store test labels
-                                "y_pred": best_result.get('y_pred', []),  # Store predictions
+                                "target_col": target_col,
+                                "y_test": best_result.get("y_true", []),
+                                "y_pred": best_result.get("y_pred", []),
+                                "y_pred_proba": best_result.get("y_pred_proba", []),
+                                "feature_importance": best_result.get("feature_importance", {}),
+                                "train_score": best_result.get("train_score", None),
+                                "cv_scores": best_result.get("cv_scores", []),
                             }
                             st.session_state.chat_history = []
-                            
+
                             st.success(f"✅ Training complete! Best model: **{best_model_name}**")
                             st.rerun()
-                    
+
                     except Exception as exc:
                         st.error(f"❌ AutoML failed: {exc}")
                     finally:
-                        # Clean up temp file
-                        import os
-                        if 'tmp_path' in locals():
+                        if "tmp_path" in locals():
                             try:
                                 os.unlink(tmp_path)
-                            except:
+                            except Exception:
                                 pass
 
     else:
         st.info("👆 Upload a CSV file to get started.")
 
-# ── Tab 2: Results ───────────────────────────────────────────────────────────
+# ── Tab 2: Results ────────────────────────────────────────────────────────────
 
 with tab_results:
     if st.session_state.result is None:
@@ -338,31 +329,81 @@ with tab_results:
     else:
         res = st.session_state.result
 
+        # ── Leaderboard ──
         st.markdown("### 🏆 Model Leaderboard")
         leaderboard_df = pd.DataFrame(res["leaderboard"])
         st.dataframe(leaderboard_df.style.format(precision=4), use_container_width=True)
 
-        st.divider()
-        st.markdown("### 🥇 Best Model")
+        # ── Model comparison chart (all models) ──
+        if len(res["leaderboard"]) > 1:
+            st.divider()
+            st.markdown("### 📊 Model Comparison")
+            try:
+                from Backend.visualization import plot_model_comparison
+                fig = plot_model_comparison(res["leaderboard"])
+                col_chart, _ = st.columns([2, 1])
+                with col_chart:
+                    st.pyplot(fig)
+            except Exception as e:
+                st.warning(f"Could not render model comparison chart: {e}")
 
+        st.divider()
+
+        # ── Best model metrics ──
+        st.markdown("### 🥇 Best Model")
         best_name = res["best_model_name"]
         best_metrics = res["best_metrics"]
 
         if res["task_type"] == "classification":
             m_col1, m_col2, m_col3, m_col4 = st.columns(4)
             m_col1.metric("Model", best_name)
-            m_col2.metric("F1 Score", f"{best_metrics.get('f1', 'N/A'):.4f}")
-            m_col3.metric("Accuracy", f"{best_metrics.get('accuracy', 'N/A'):.4f}")
-            m_col4.metric("Precision", f"{best_metrics.get('precision', 'N/A'):.4f}")
+            m_col2.metric("F1 Score", f"{best_metrics.get('f1', 0):.4f}")
+            m_col3.metric("Accuracy", f"{best_metrics.get('accuracy', 0):.4f}")
+            m_col4.metric("Precision", f"{best_metrics.get('precision', 0):.4f}")
         else:
             m_col1, m_col2, m_col3, m_col4 = st.columns(4)
             m_col1.metric("Model", best_name)
-            m_col2.metric("R²", f"{best_metrics.get('r2', 'N/A'):.4f}")
-            m_col3.metric("RMSE", f"{best_metrics.get('rmse', 'N/A'):.4f}")
-            m_col4.metric("MAE", f"{best_metrics.get('mae', 'N/A'):.4f}")
+            m_col2.metric("R²", f"{best_metrics.get('r2', 0):.4f}")
+            m_col3.metric("RMSE", f"{best_metrics.get('rmse', 0):.4f}")
+            m_col4.metric("MAE", f"{best_metrics.get('mae', 0):.4f}")
 
         st.divider()
 
+        # ── Overfitting indicator ──
+        train_score = res.get("train_score")
+        test_score = best_metrics.get("f1") if res["task_type"] == "classification" else best_metrics.get("r2")
+
+        if train_score is not None and test_score is not None:
+            st.markdown("### ⚖️ Overfitting Analysis")
+            gap = abs(float(train_score) - float(test_score))
+            if gap < 0.05:
+                risk_label, risk_color = "Low risk ✅", "normal"
+            elif gap < 0.15:
+                risk_label, risk_color = "Moderate risk ⚠️", "off"
+            else:
+                risk_label, risk_color = "High risk ❌", "inverse"
+
+            ov_col1, ov_col2, ov_col3 = st.columns(3)
+            ov_col1.metric("Train Score", f"{float(train_score):.4f}")
+            ov_col2.metric("Test Score", f"{float(test_score):.4f}")
+            ov_col3.metric("Gap", f"{gap:.4f}", delta=risk_label, delta_color=risk_color)
+            st.divider()
+
+        # ── CV scores ──
+        cv_scores = res.get("cv_scores", [])
+        if cv_scores:
+            st.markdown("### 🔁 Cross-Validation Scores")
+            cv_arr = np.array(cv_scores)
+            cv_col1, cv_col2, cv_col3 = st.columns(3)
+            cv_col1.metric("CV Mean", f"{cv_arr.mean():.4f}")
+            cv_col2.metric("CV Std", f"{cv_arr.std():.4f}")
+            cv_col3.metric("CV Folds", len(cv_arr))
+
+            fold_df = pd.DataFrame({"Fold": [f"Fold {i+1}" for i in range(len(cv_arr))], "Score": cv_arr})
+            st.dataframe(fold_df.style.format({"Score": "{:.4f}"}), use_container_width=True, hide_index=True)
+            st.divider()
+
+        # ── All model metrics table ──
         st.markdown("### 📋 All Model Metrics")
         metrics_display = pd.DataFrame([
             {"Model": name, **res["results"][name]["metrics"]}
@@ -370,20 +411,14 @@ with tab_results:
         ])
         st.dataframe(metrics_display, use_container_width=True)
 
-        st.divider()
-
-        # Placeholder for future features
-        st.info("💡 **Coming Soon:** Visualizations, feature importance, and overfitting analysis will be added here.")
-
-# ── Tab 3: Analysis ──────────────────────────────────────────────────────
+# ── Tab 3: Analysis ───────────────────────────────────────────────────────────
 
 with tab_analysis:
     if st.session_state.result is None:
         st.info("Run AutoML first to see data analysis and diagnostics.")
     else:
         res = st.session_state.result
-        
-        # Import visualization functions
+
         from Backend.visualization import (
             plot_target_distribution,
             plot_correlation_matrix,
@@ -391,129 +426,145 @@ with tab_analysis:
             plot_feature_importance,
             plot_confusion_matrix,
             plot_regression_diagnostics,
+            plot_roc_curve,
         )
-        from Backend.analytics import extract_feature_importance
-        from Backend.preprocessor import identify_feature_types
-        
-        # Get numeric and categorical columns
-        numeric_cols, categorical_cols = identify_feature_types(
-            st.session_state.uploaded_df, 
-            st.session_state.uploaded_df.columns[-1]  # Target is last column
-        )
-        
-        # ── EDA Section ──
+        from Backend.analytics import analyze_per_class_metrics
+
+        # Use the actual target column chosen during training
+        target_col = res.get("target_col", st.session_state.uploaded_df.columns[-1])
+
+        # ── EDA Section ──────────────────────────────────────────────────────
         st.markdown("### 📈 Exploratory Data Analysis")
-        
-        eda_col1, eda_col2, eda_col3 = st.columns(3)
-        
-        with eda_col1:
-            if st.button("📊 Target Distribution", key="btn_target_dist"):
-                st.session_state.show_target_dist = True
-        
-        with eda_col2:
-            if st.button("🔗 Correlations", key="btn_corr"):
-                st.session_state.show_corr = True
-        
-        with eda_col3:
-            if st.button("⚠️ Missing Values", key="btn_missing"):
-                st.session_state.show_missing = True
-        
-        # Display EDA plots
-        if st.session_state.get('show_target_dist', False):
+
+        eda_c1, eda_c2 = st.columns(2)
+
+        with eda_c1:
             try:
+                st.markdown("**Target Distribution**")
                 fig = plot_target_distribution(
                     st.session_state.uploaded_df,
-                    st.session_state.uploaded_df.columns[-1],
-                    res['task_type']
+                    target_col,
+                    res["task_type"],
                 )
                 st.pyplot(fig)
             except Exception as e:
                 st.error(f"Error plotting target distribution: {e}")
-        
-        if st.session_state.get('show_corr', False):
+
+        with eda_c2:
             try:
-                fig = plot_correlation_matrix(st.session_state.uploaded_df, st.session_state.uploaded_df.columns[-1])
-                st.pyplot(fig)
-            except Exception as e:
-                st.error(f"Error plotting correlation matrix: {e}")
-        
-        if st.session_state.get('show_missing', False):
-            try:
-                fig = plot_missing_values(st.session_state.uploaded_df, st.session_state.uploaded_df.columns[-1])
-                if fig is not None:
-                    st.pyplot(fig)
+                missing = st.session_state.uploaded_df.isnull().sum().sum()
+                if missing > 0:
+                    st.markdown("**Missing Values**")
+                    fig = plot_missing_values(st.session_state.uploaded_df, target_col)
+                    if fig is not None:
+                        st.pyplot(fig)
                 else:
                     st.success("✅ No missing values in the dataset!")
             except Exception as e:
                 st.error(f"Error plotting missing values: {e}")
-        
+
+        try:
+            st.markdown("**Feature Correlation Matrix**")
+            fig = plot_correlation_matrix(st.session_state.uploaded_df, target_col)
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"Error plotting correlation matrix: {e}")
+
         st.divider()
-        
-        # ── Model Diagnostics Section ──
+
+        # ── Model Diagnostics ─────────────────────────────────────────────────
         st.markdown("### 🔬 Model Diagnostics")
-        
-        # Check if we have predictions
-        if 'y_test' in res and 'y_pred' in res:
-            y_test = res.get('y_test', [])
-            y_pred = res.get('y_pred', [])
-            
-            if res['task_type'] == "classification":
+
+        y_test = np.array(res.get("y_test", []))
+        y_pred = np.array(res.get("y_pred", []))
+        y_pred_proba = res.get("y_pred_proba", [])
+
+        if len(y_test) > 0 and len(y_pred) > 0:
+            if res["task_type"] == "classification":
+                diag_c1, diag_c2 = st.columns(2)
+
+                with diag_c1:
+                    try:
+                        st.markdown("**Confusion Matrix**")
+                        fig = plot_confusion_matrix(y_test, y_pred)
+                        st.pyplot(fig)
+                    except Exception as e:
+                        st.warning(f"Could not generate confusion matrix: {e}")
+
+                with diag_c2:
+                    if y_pred_proba:
+                        try:
+                            st.markdown("**ROC Curve**")
+                            fig = plot_roc_curve(y_test, np.array(y_pred_proba))
+                            if fig is not None:
+                                st.pyplot(fig)
+                        except Exception as e:
+                            st.warning(f"Could not generate ROC curve: {e}")
+
+                # Per-class metrics table
                 try:
-                    fig = plot_confusion_matrix(y_test, y_pred)
-                    st.subheader("Confusion Matrix")
-                    st.pyplot(fig)
+                    st.markdown("**Per-Class Metrics**")
+                    per_class_df = analyze_per_class_metrics(y_test, y_pred)
+                    if per_class_df is not None:
+                        st.dataframe(per_class_df, use_container_width=True, hide_index=True)
                 except Exception as e:
-                    st.warning(f"Could not generate confusion matrix: {e}")
+                    st.warning(f"Could not generate per-class metrics: {e}")
+
             else:
                 try:
+                    st.markdown("**Regression Diagnostics**")
                     fig = plot_regression_diagnostics(y_test, y_pred)
-                    st.subheader("Regression Diagnostics")
                     st.pyplot(fig)
                 except Exception as e:
                     st.warning(f"Could not generate regression diagnostics: {e}")
-        else:
-            st.info("💡 Prediction data not yet available. Train models to see diagnostics.")
-        
-        st.divider()
-        
-        # ── Feature Importance Section ──
-        st.markdown("### ⭐ Feature Importance")
-        
-        if 'y_test' in res and 'y_pred' in res and st.session_state.uploaded_df is not None:
-            y_test = res.get('y_test', [])
-            y_pred = res.get('y_pred', [])
-            feature_names = [col for col in st.session_state.uploaded_df.columns if col != st.session_state.uploaded_df.columns[-1]]
-            
-            try:
-                # Extract and display feature importance
-                importance_df = extract_feature_importance(
-                    None,  # Model not needed for permutation importance fallback
-                    st.session_state.uploaded_df[feature_names].values,
-                    y_test,
-                    feature_names,
-                    res['task_type']
-                )
-                
-                col_imp_table, col_imp_chart = st.columns([1, 1])
-                
-                with col_imp_table:
-                    st.subheader("Top Features by Importance")
-                    st.dataframe(importance_df.head(10), use_container_width=True, hide_index=True)
-                
-                with col_imp_chart:
-                    st.subheader("Feature Importance Distribution")
-                    try:
-                        fig = plot_feature_importance(importance_df, feature_names)
-                        st.pyplot(fig)
-                    except Exception as e:
-                        st.info("Feature importance plot unavailable")
-                        
-            except Exception as e:
-                st.info("⏳ Feature importance analysis available after model training")
-        else:
-            st.info("⏳ Train models first to see feature importance analysis")
 
-# ── Tab 4: Gemini Chat ──────────────────────────────────────────────────────
+                # Residual distribution
+                try:
+                    import matplotlib.pyplot as plt
+                    residuals = y_test - y_pred
+                    st.markdown("**Residual Distribution**")
+                    fig, ax = plt.subplots(figsize=(6, 3.5))
+                    ax.hist(residuals, bins=30, color="steelblue", edgecolor="black", alpha=0.7)
+                    ax.axvline(0, color="red", linestyle="--", lw=1.5)
+                    ax.set_xlabel("Residual (actual − predicted)")
+                    ax.set_ylabel("Count")
+                    ax.set_title("Residual Distribution")
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.warning(f"Could not generate residual distribution: {e}")
+        else:
+            st.info("💡 Prediction data not available. Train models to see diagnostics.")
+
+        st.divider()
+
+        # ── Feature Importance ────────────────────────────────────────────────
+        st.markdown("### ⭐ Feature Importance")
+
+        feature_importance_raw = res.get("feature_importance", {})
+        if feature_importance_raw:
+            importance_df = pd.DataFrame([
+                {"Feature": name, "Importance": score}
+                for name, score in feature_importance_raw.items()
+            ]).sort_values("Importance", ascending=False).reset_index(drop=True)
+
+            imp_c1, imp_c2 = st.columns([1, 1])
+
+            with imp_c1:
+                st.markdown("**Top Features**")
+                st.dataframe(importance_df.head(10), use_container_width=True, hide_index=True)
+
+            with imp_c2:
+                try:
+                    st.markdown("**Importance Chart**")
+                    fig = plot_feature_importance(importance_df, top_n=15)
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.info(f"Feature importance plot unavailable: {e}")
+        else:
+            st.info("⏳ Feature importance not returned by the backend. Ensure your FastAPI /train endpoint includes a 'feature_importance' dict in its response.")
+
+# ── Tab 4: Gemini Chat ────────────────────────────────────────────────────────
 
 with tab_chat:
     if st.session_state.result is None:
@@ -521,62 +572,51 @@ with tab_chat:
     else:
         res = st.session_state.result
 
-        # Suggested questions
         st.markdown("#### 💡 Suggested Questions")
         q_cols = st.columns(len(SUGGESTED_QUESTIONS))
         for i, question in enumerate(SUGGESTED_QUESTIONS):
             if q_cols[i].button(question, key=f"sq_{i}", use_container_width=True):
-                st.session_state.chat_history.append(
-                    {"role": "user", "content": question}
-                )
+                st.session_state.chat_history.append({"role": "user", "content": question})
                 with st.spinner("Asking Gemini…"):
                     try:
                         response = requests.post(
                             f"{FASTAPI_BASE_URL}/chat",
-                            params={"message": question}
+                            params={"message": question},
                         )
-                        if response.status_code == 200:
-                            answer = response.json()["response"]
-                        else:
-                            answer = f"Error: {response.json().get('detail', 'Unknown error')}"
+                        answer = (
+                            response.json()["response"]
+                            if response.status_code == 200
+                            else f"Error: {response.json().get('detail', 'Unknown error')}"
+                        )
                     except Exception as exc:
                         answer = f"Connection error: {exc}"
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": answer}
-                )
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
                 st.rerun()
 
         st.divider()
 
-        # Chat history
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Chat input
         user_input = st.chat_input("Ask about your AutoML results…")
         if user_input:
-            st.session_state.chat_history.append(
-                {"role": "user", "content": user_input}
-            )
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
             with st.chat_message("user"):
                 st.markdown(user_input)
-
             with st.chat_message("assistant"):
                 with st.spinner("Thinking…"):
                     try:
                         response = requests.post(
                             f"{FASTAPI_BASE_URL}/chat",
-                            params={"message": user_input}
+                            params={"message": user_input},
                         )
-                        if response.status_code == 200:
-                            answer = response.json()["response"]
-                        else:
-                            answer = f"Error: {response.json().get('detail', 'Unknown error')}"
+                        answer = (
+                            response.json()["response"]
+                            if response.status_code == 200
+                            else f"Error: {response.json().get('detail', 'Unknown error')}"
+                        )
                     except Exception as exc:
                         answer = f"Connection error: {exc}"
                 st.markdown(answer)
-
-            st.session_state.chat_history.append(
-                {"role": "assistant", "content": answer}
-            )
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
