@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import numpy as np
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -39,7 +40,7 @@ from core.chat_service import generate_dataset_response
 app = FastAPI(
     title="AutoML Backend API",
     description="Machine Learning Pipeline with Preprocessing and Model Training",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 app.add_middleware(
@@ -101,6 +102,116 @@ def build_upload_summary(df: pd.DataFrame, target_column: str, dataset_id: str) 
     )
 
 
+# ── Feature importance extraction ─────────────────────────────────────────────
+
+def _get_feature_names(pipeline, df: pd.DataFrame, target_column: str) -> list[str]:
+    """
+    Get feature names after preprocessing.
+    Tries pipeline.get_feature_names_out() first (sklearn >= 1.0),
+    falls back to building names manually.
+    """
+    try:
+        raw_names = pipeline.get_feature_names_out()
+        # Strip transformer prefix (e.g. "numeric__age" → "age")
+        cleaned = []
+        for name in raw_names:
+            if "__" in name:
+                cleaned.append(name.split("__", 1)[1])
+            else:
+                cleaned.append(name)
+        return cleaned
+    except Exception:
+        # Fallback: numeric cols + generic names for categoricals
+        numeric_cols, categorical_cols = identify_feature_types(df, target_column)
+        names = list(numeric_cols)
+        for col in categorical_cols:
+            names.append(col)
+        return names
+
+
+def extract_feature_importance(
+    model,
+    X_test_processed: np.ndarray,
+    y_test,
+    feature_names: list[str],
+    task: str,
+) -> dict[str, float]:
+    """
+    Extract feature importance from a trained model.
+
+    Priority:
+      1. model.feature_importances_  → tree-based models (RF, DT, GBM)
+      2. model.coef_                 → linear models (LR, Ridge, Lasso)
+      3. permutation importance      → KNN, SVM, NaiveBayes (fallback)
+
+    Returns a dict {feature_name: importance_score} sorted by importance desc.
+    """
+    importance_values: np.ndarray | None = None
+    n_features = X_test_processed.shape[1]
+
+    # 1. Tree-based: direct feature_importances_
+    if hasattr(model, "feature_importances_"):
+        importance_values = model.feature_importances_
+
+    # 2. Linear models: absolute value of coefficients
+    elif hasattr(model, "coef_"):
+        coef = np.array(model.coef_)
+        if coef.ndim > 1:
+            # Multiclass: average across classes
+            coef = np.mean(np.abs(coef), axis=0)
+        importance_values = np.abs(coef)
+
+    # 3. Fallback: permutation importance (works for any model)
+    else:
+        try:
+            from sklearn.inspection import permutation_importance
+            from sklearn.metrics import f1_score, r2_score
+
+            scoring = (
+                lambda est, X, y: f1_score(y, est.predict(X), average="weighted", zero_division=0)
+                if task == "classification"
+                else r2_score(y, est.predict(X))
+            )
+            perm = permutation_importance(
+                model, X_test_processed, y_test,
+                n_repeats=5, random_state=42,
+                scoring=scoring,
+            )
+            importance_values = perm.importances_mean
+        except Exception:
+            importance_values = np.zeros(n_features)
+
+    # Align length with feature_names (transformer can expand features via OHE)
+    if importance_values is not None and len(importance_values) != len(feature_names):
+        # Trim or pad to match
+        if len(importance_values) > len(feature_names):
+            importance_values = importance_values[: len(feature_names)]
+        else:
+            importance_values = np.pad(
+                importance_values,
+                (0, len(feature_names) - len(importance_values)),
+                constant_values=0.0,
+            )
+
+    if importance_values is None:
+        importance_values = np.zeros(len(feature_names))
+
+    # Normalise to [0, 1] so all models are comparable
+    total = importance_values.sum()
+    if total > 0:
+        importance_values = importance_values / total
+
+    result = {
+        name: round(float(score), 6)
+        for name, score in zip(feature_names, importance_values)
+    }
+
+    # Sort descending by score
+    return dict(sorted(result.items(), key=lambda x: x[1], reverse=True))
+
+
+# ── Core training function ────────────────────────────────────────────────────
+
 def train_selected_models(
     df: pd.DataFrame,
     target_column: str,
@@ -127,6 +238,9 @@ def train_selected_models(
     X_train_processed = pipeline.fit_transform(X_train)
     X_test_processed = pipeline.transform(X_test)
 
+    # Get feature names after preprocessing (for importance labelling)
+    feature_names = _get_feature_names(pipeline, df, target_column)
+
     results: dict[str, Any] = {}
 
     for model_name in model_names:
@@ -137,11 +251,48 @@ def train_selected_models(
             if task == "classification":
                 metrics = evaluate_classification(y_test, y_pred)
                 score_key = "f1"
+
+                # Predict probabilities for ROC curve (not all models support it)
+                y_pred_proba: list | None = None
+                if hasattr(best_model, "predict_proba"):
+                    try:
+                        y_pred_proba = best_model.predict_proba(X_test_processed).tolist()
+                    except Exception:
+                        y_pred_proba = None
+
             else:
                 metrics = evaluate_regression(y_test, y_pred)
                 score_key = "r2"
+                y_pred_proba = None
 
-            results[model_name] = normalize(
+            # Train score for overfitting analysis
+            y_train_pred = best_model.predict(X_train_processed)
+            if task == "classification":
+                from sklearn.metrics import f1_score
+                train_score = float(f1_score(y_train, y_train_pred, average="weighted", zero_division=0))
+            else:
+                from sklearn.metrics import r2_score
+                train_score = float(r2_score(y_train, y_train_pred))
+
+            # Cross-validation scores
+            try:
+                from sklearn.model_selection import cross_val_score
+                import scipy.sparse as sp
+                X_full = pipeline.transform(df.drop(columns=[target_column]))
+                y_full = df[target_column]
+                cv_scoring = "f1_weighted" if task == "classification" else "r2"
+                cv_scores = cross_val_score(
+                    best_model, X_full, y_full, cv=5, scoring=cv_scoring, n_jobs=-1
+                ).tolist()
+            except Exception:
+                cv_scores = []
+
+            # Feature importance
+            importance = extract_feature_importance(
+                best_model, X_test_processed, y_test, feature_names, task
+            )
+
+            result_entry = normalize(
                 {
                     "status": "success",
                     "model_name": model_name,
@@ -154,8 +305,14 @@ def train_selected_models(
                     "test_samples": len(X_test),
                     "y_true": y_test.tolist(),
                     "y_pred": y_pred.tolist(),
+                    "y_pred_proba": y_pred_proba,
+                    "train_score": train_score,
+                    "cv_scores": cv_scores,
+                    "feature_importance": importance,
                 }
             )
+            results[model_name] = result_entry
+
         except Exception as exc:
             results[model_name] = {
                 "status": "error",
@@ -167,7 +324,7 @@ def train_selected_models(
         [
             {"model": name, "score": result["score"]}
             for name, result in results.items()
-            if result["status"] == "success"
+            if result.get("status") == "success"
         ],
         key=lambda item: item["score"],
         reverse=True,
@@ -178,13 +335,15 @@ def train_selected_models(
             "status": "success",
             "task": task,
             "total_models": len(model_names),
-            "successful": sum(1 for result in results.values() if result["status"] == "success"),
-            "failed": sum(1 for result in results.values() if result["status"] == "error"),
+            "successful": sum(1 for r in results.values() if r.get("status") == "success"),
+            "failed": sum(1 for r in results.values() if r.get("status") == "error"),
             "leaderboard": leaderboard,
             "detailed_results": results,
         }
     )
 
+
+# ── Background job runner ─────────────────────────────────────────────────────
 
 def run_training_job(
     job_id: str,
@@ -197,12 +356,7 @@ def run_training_job(
     try:
         dataset = get_dataset(dataset_id)
         result = train_selected_models(dataset["df"], target_column, test_size, model_names)
-        jobs[job_id].update(
-            {
-                "status": "success",
-                "result": result,
-            }
-        )
+        jobs[job_id].update({"status": "success", "result": result})
         dataset["results"].update(result["detailed_results"])
     except HTTPException as exc:
         jobs[job_id].update(
@@ -215,12 +369,14 @@ def run_training_job(
         jobs[job_id].update({"status": "error", "message": str(exc)})
 
 
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
 @app.get("/")
 def root() -> dict[str, Any]:
     return {
         "status": "success",
         "message": "AutoML Backend API is running",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "datasets_loaded": len(datasets),
         "jobs_created": len(jobs),
     }
@@ -404,7 +560,7 @@ def chat_with_dataset(message: str, dataset_id: str | None = None, model_name: s
     if model_name is None:
         best_model = max(
             results.items(),
-            key=lambda item: item[1].get("score", float("-inf"))
+            key=lambda item: item[1].get("score", float("-inf")),
         )
         model_name, model_result = best_model
     else:
@@ -432,5 +588,4 @@ def chat_with_dataset(message: str, dataset_id: str | None = None, model_name: s
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
